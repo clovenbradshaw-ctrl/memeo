@@ -1,1 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12100e">
+<title>Line Runner</title>
+<style>
+  :root{
+    --bg:#12100e;
+    --panel:#1c1916;
+    --panel2:#26221d;
+    --ink:#f4ede0;
+    --dim:#a89a86;
+    --faint:#6f6558;
+    --accent:#e8a13c;
+    --accent2:#c9762a;
+    --good:#7fb069;
+    --line:#332d26;
+    --radius:16px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);color:var(--ink);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex;flex-direction:column;min-height:100dvh;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:none}
+  header{
+    padding:14px 18px calc(14px + env(safe-area-inset-top));
+    padding-top:calc(14px + env(safe-area-inset-top));
+    display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:var(--bg);z-index:5;
+  }
+  header .brand{font-weight:700;letter-spacing:.02em;font-size:18px}
+  header .brand span{color:var(--accent)}
+  header .sub{font-size:12px;color:var(--faint);margin-left:auto;text-align:right;line-height:1.3}
+  main{flex:1;padding:18px;max-width:760px;width:100%;margin:0 auto}
+  h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+  .btn{
+    background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+    padding:12px 16px;font-size:15px;font-weight:600;display:inline-flex;align-items:center;
+    justify-content:center;gap:8px;
+  }
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{background:var(--accent);color:#1a1206;border-color:var(--accent)}
+  .btn.ghost{background:transparent}
+  .btn.block{width:100%}
+  .btn.danger{color:#e88a7a}
+  textarea{
+    width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:12px;padding:12px;font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical;
+  }
+  input[type=text],select{
+    width:100%;background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:10px;padding:10px 12px;font-size:15px;
+  }
+  label.fld{display:block;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:0 0 6px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>*{flex:1}
+  .muted{color:var(--dim);font-size:13px}
+  .faint{color:var(--faint);font-size:12px}
+  /* library */
+  .scriptItem{display:flex;align-items:center;gap:12px;padding:14px 4px;border-bottom:1px solid var(--line)}
+  .scriptItem:last-child{border-bottom:none}
+  .scriptItem .t{font-weight:600}
+  .scriptItem .m{font-size:12px;color:var(--faint)}
+  .scriptItem .go{margin-left:auto}
+  /* chunk preview */
+  .chunk{padding:8px 10px;border-left:3px solid var(--line);margin:0 0 6px;background:var(--panel2);border-radius:0 8px 8px 0;font-size:14px}
+  .chunk .n{color:var(--faint);font-size:11px;margin-right:8px}
+  .chunk.cue{border-left-color:var(--accent2)}
+  .chunk.cue .who{color:var(--accent);font-weight:700;margin-right:6px}
+  .chunk.beat{margin-top:14px}
+  /* rehearse */
+  .levels{display:flex;gap:6px;margin:0 0 18px;overflow-x:auto;padding-bottom:4px}
+  .lv{flex:0 0 auto;padding:9px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel);font-size:13px;font-weight:600;color:var(--dim);white-space:nowrap}
+  .lv.on{background:var(--accent);color:#1a1206;border-color:var(--accent)}
+  .stage{
+    background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px 20px;
+    min-height:230px;display:flex;flex-direction:column;justify-content:center;text-align:center;margin-bottom:16px;
+  }
+  .stage .cur{font-size:26px;line-height:1.4;font-weight:600}
+  .stage .cur.cue{color:var(--accent)}
+  .stage .cur .whoTag{display:block;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+  .stage .nxt{margin-top:16px;font-size:15px;color:var(--faint);line-height:1.4}
+  .stage .phase{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin-bottom:14px}
+  .stage .silent{color:var(--accent);font-weight:600;letter-spacing:.02em}
+  .transport{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+  .bigplay{
+    flex:1;background:var(--accent);color:#1a1206;border-radius:18px;padding:22px;font-size:20px;font-weight:800;
+    display:flex;align-items:center;justify-content:center;gap:10px;
+  }
+  .bigplay.playing{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+  .round{width:64px;height:64px;flex:0 0 64px;border-radius:18px;background:var(--panel2);border:1px solid var(--line);font-size:22px;display:flex;align-items:center;justify-content:center}
+  .hint{width:100%;background:var(--panel2);border:1px solid var(--accent2);color:var(--accent);border-radius:16px;padding:18px;font-size:17px;font-weight:700;margin-bottom:14px}
+  .hint:active{background:#2f2519}
+  .ctlrow{display:flex;gap:10px;margin-bottom:8px}
+  .ctlrow .btn{flex:1;padding:14px 8px;font-size:14px}
+  .progress{height:6px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:6px 0 14px}
+  .progress i{display:block;height:100%;background:var(--accent);width:0%}
+  .settings{border-top:1px solid var(--line);margin-top:8px;padding-top:14px}
+  .set-row{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .set-row label{flex:0 0 96px;font-size:13px;color:var(--dim)}
+  .set-row input[type=range]{flex:1;accent-color:var(--accent)}
+  .set-row .val{flex:0 0 52px;text-align:right;font-size:13px;color:var(--faint)}
+  .toggle{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--dim)}
+  .toggle input{width:20px;height:20px;accent-color:var(--accent)}
+  .backbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .backbar .btn{padding:8px 12px}
+  .rules{font-size:12.5px;color:var(--dim);line-height:1.7}
+  .rules code{background:var(--panel2);padding:1px 6px;border-radius:5px;color:var(--accent);font-size:12px}
+  .pill{display:inline-block;font-size:11px;color:var(--faint);border:1px solid var(--line);border-radius:99px;padding:2px 8px;margin-left:6px}
+  .empty{text-align:center;color:var(--faint);padding:30px 10px}
+  .noticebar{font-size:12px;color:var(--faint);text-align:center;padding:10px 18px;border-top:1px solid var(--line)}
+  .chunkedit{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px}
+  .chunkedit .n{flex:0 0 28px;color:var(--faint);font-size:12px;padding-top:12px}
+  .chunkedit textarea{flex:1;min-height:44px}
+  .small{padding:8px 10px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Line <span>Runner</span></div>
+  <div class="sub" id="subline">monologue trainer</div>
+</header>
+<main id="app"></main>
+<div class="noticebar" id="notice"></div>
 
+<script>
+"use strict";
+
+/* ---------- eoreader4 TTS hook ----------
+   Browser-native speech. If your eoreader4 build exposes a speaker on
+   window.eoreader4 (with .speak(text,{voice,rate,onend,onerror}) and .cancel()),
+   Line Runner uses it. Otherwise it falls back to the Web Speech API,
+   which is the browser-native engine eoreader4 sits on. Single swap point.  */
+const TTS = (function(){
+  const ext = (typeof window!=="undefined") && window.eoreader4 && typeof window.eoreader4.speak==="function" ? window.eoreader4 : null;
+  let voices=[];
+  function load(){ try{ voices = window.speechSynthesis.getVoices()||[]; }catch(e){ voices=[]; } }
+  if(!ext && "speechSynthesis" in window){
+    load();
+    try{ window.speechSynthesis.onvoiceschanged = load; }catch(e){}
+  }
+  return {
+    external: !!ext,
+    listVoices(){
+      if(ext && ext.listVoices) return ext.listVoices();
+      if(!voices.length) load();
+      return voices.filter(v=>/^en/i.test(v.lang)).concat(voices.filter(v=>!/^en/i.test(v.lang)));
+    },
+    speak(text,{voiceURI,rate=1,onend,onerror}={}){
+      if(ext){ return ext.speak(text,{voice:voiceURI,rate,onend,onerror}); }
+      try{
+        const u=new SpeechSynthesisUtterance(text);
+        const v=voices.find(x=>x.voiceURI===voiceURI);
+        if(v)u.voice=v;
+        u.rate=rate;
+        u.onend=()=>onend&&onend();
+        u.onerror=()=>onerror?onerror():onend&&onend();
+        window.speechSynthesis.speak(u);
+      }catch(e){ setTimeout(()=>onend&&onend(),400); }
+    },
+    cancel(){
+      if(ext&&ext.cancel){ ext.cancel(); return; }
+      try{ window.speechSynthesis.cancel(); }catch(e){}
+    },
+    ok(){ return ext || ("speechSynthesis" in window); }
+  };
+})();
+
+/* ---------- persistence ----------
+   Priority order: a host-provided window.storage (async KV) → browser
+   localStorage → in-memory (session only). localStorage keeps saved pieces
+   across reloads in a plain browser; the in-memory map is the last-resort
+   fallback (e.g. private mode with storage blocked).  */
+const mem={};
+function lsOk(){ try{ return typeof localStorage!=="undefined" && localStorage!==null; }catch(e){ return false; } }
+const Store={
+  async get(k){
+    try{ if(window.storage){ const r=await window.storage.get(k); return r?JSON.parse(r.value):null; } }catch(e){}
+    if(lsOk()){ try{ const v=localStorage.getItem(k); if(v!=null) return JSON.parse(v); }catch(e){} }
+    return mem[k]!==undefined?mem[k]:null;
+  },
+  async set(k,v){
+    mem[k]=v;
+    try{ if(window.storage){ await window.storage.set(k,JSON.stringify(v)); return; } }catch(e){}
+    if(lsOk()){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} }
+  },
+  async del(k){
+    delete mem[k];
+    try{ if(window.storage){ await window.storage.delete(k); return; } }catch(e){}
+    if(lsOk()){ try{ localStorage.removeItem(k); }catch(e){} }
+  }
+};
+
+/* ---------- helpers ---------- */
+const uid=()=>Math.random().toString(36).slice(2,9);
+function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+function splitSentences(text){
+  const lines=text.split(/\n/).map(l=>l.trim()).filter(Boolean);
+  const avg=lines.reduce((a,l)=>a+l.length,0)/Math.max(1,lines.length);
+  if(lines.length>1 && avg<58) return lines;               // verse / hard line breaks
+  const joined=lines.join(" ");
+  const parts=joined.match(/[^.!?;]+[.!?;]+["')\]]?|\S[^.!?;]*$/g);
+  return parts?parts.map(p=>p.trim()).filter(Boolean):[joined];
+}
+function parseChunks(raw){
+  const out=[];
+  const blocks=raw.replace(/\r/g,"").split(/\n\s*\n/);
+  blocks.forEach(block=>{
+    const t=block.trim(); if(!t) return;
+    const sentences=splitSentences(t);
+    sentences.forEach((s,i)=>{
+      const c={id:uid(),text:s.trim(),cue:false,speaker:null,beat:i===0};
+      const m=c.text.match(/^([A-Z][A-Z0-9 .'’\-]{1,24}):\s*(.+)$/);
+      if(m){ c.speaker=m[1].trim(); c.text=m[2].trim(); c.cue=true; }
+      if(c.text) out.push(c);
+    });
+  });
+  return out;
+}
+function words(t){return t.trim().split(/\s+/).filter(Boolean);}
+function leadIn(t){const w=words(t);return w.length<=4?t:w.slice(0,3).join(" ")+" …";}
+function durMs(t,pace){const n=words(t).length;return Math.max(1500,(n*380+700))*pace;}
+
+/* ---------- app state ---------- */
+const S={
+  view:"library",
+  index:[],            // [{id,title,chunks,updated}]
+  cur:null,            // active script object
+  draft:"",            // raw text while editing
+  settings:{ level:2, pace:1, loop:true, youVoice:"", cueVoice:"", rangeStart:0, rangeEnd:-1 }
+};
+
+async function boot(){
+  const idx=await Store.get("lr:index"); S.index=idx||[];
+  const st=await Store.get("lr:settings"); if(st) S.settings=Object.assign(S.settings,st);
+  render();
+  updateNotice();
+}
+function updateNotice(){
+  const n=document.getElementById("notice");
+  if(!TTS.ok()){ n.textContent="This browser has no speech engine. Open in Safari or Chrome."; return; }
+  const isiOS=/iPad|iPhone|iPod/.test(navigator.userAgent);
+  n.innerHTML = TTS.external
+    ? "Using eoreader4 TTS."
+    : (isiOS
+        ? "Tip: on iPhone, keep the screen awake while driving. iOS pauses speech when the screen locks."
+        : "Browser voices vary by device. Pick a clear voice in Edit.");
+}
+async function saveIndex(){ await Store.set("lr:index",S.index); }
+async function saveSettings(){ await Store.set("lr:settings",S.settings); }
+async function saveScript(s){
+  s.updated=Date.now();
+  await Store.set("lr:script:"+s.id,s);
+  const row={id:s.id,title:s.title,updated:s.updated,count:s.chunks.length};
+  const i=S.index.findIndex(x=>x.id===s.id);
+  if(i>=0)S.index[i]=row; else S.index.unshift(row);
+  await saveIndex();
+}
+async function loadScript(id){ return await Store.get("lr:script:"+id); }
+async function delScript(id){
+  await Store.del("lr:script:"+id);
+  S.index=S.index.filter(x=>x.id!==id); await saveIndex();
+}
+
+/* =========================================================
+   RENDER
+========================================================= */
+function render(){
+  const el=document.getElementById("app");
+  el.innerHTML = S.view==="library" ? viewLibrary()
+              : S.view==="edit"    ? viewEdit()
+              : viewRehearse();
+  wire();
+  document.getElementById("subline").textContent =
+    S.view==="rehearse" && S.cur ? S.cur.title : "monologue trainer";
+}
+
+function viewLibrary(){
+  const items = S.index.length ? S.index.map(x=>`
+    <div class="scriptItem" data-open="${x.id}">
+      <div>
+        <div class="t">${esc(x.title)}</div>
+        <div class="m">${x.count} chunk${x.count===1?"":"s"} · ${new Date(x.updated).toLocaleDateString()}</div>
+      </div>
+      <button class="btn small ghost go" data-open="${x.id}">Open ▸</button>
+    </div>`).join("")
+    : `<div class="empty">No pieces yet.<br>Paste a monologue to begin.</div>`;
+  return `
+    <button class="btn primary block" id="new" style="margin-bottom:16px">＋ New piece</button>
+    <div class="card">
+      <h2>Your pieces</h2>
+      ${items}
+    </div>
+    <div class="card">
+      <h2>How the ladder works</h2>
+      <div class="rules">
+        <b style="color:var(--ink)">1 · Listen</b> — the whole piece read to you.<br>
+        <b style="color:var(--ink)">2 · Echo</b> — a chunk, then a gap to say it back.<br>
+        <b style="color:var(--ink)">3 · Lead-in</b> — first few words, gap, then the full chunk.<br>
+        <b style="color:var(--ink)">4 · Recall</b> — silence first, you say it, then it confirms.<br>
+        <b style="color:var(--ink)">5 · Off book</b> — silence only. Tap <span class="pill">Hint</span> when stuck.
+        <br><br>Built for driving: press play once and it runs hands-free. The big Hint button gives the lead-in without you having to look.
+      </div>
+    </div>`;
+}
+
+function viewEdit(){
+  const raw = S.draft;
+  const chunks = parseChunks(raw);
+  const voices = TTS.listVoices();
+  const vOpts = sel => voices.map(v=>`<option value="${esc(v.voiceURI)}" ${sel===v.voiceURI?"selected":""}>${esc(v.name)} · ${esc(v.lang)}</option>`).join("");
+  const preview = chunks.length ? chunks.map((c,i)=>`
+      <div class="chunk ${c.cue?"cue":""} ${c.beat&&i>0?"beat":""}">
+        <span class="n">${i+1}</span>${c.cue?`<span class="who">${esc(c.speaker)}</span>`:""}${esc(c.text)}
+      </div>`).join("")
+    : `<div class="faint">Paste text above to see the chunks.</div>`;
+  return `
+    <div class="backbar">
+      <button class="btn ghost small" id="back">◂ Back</button>
+      <div class="muted">${S.cur?"Edit piece":"New piece"}</div>
+    </div>
+    <div class="card">
+      <label class="fld" for="title">Title</label>
+      <input type="text" id="title" placeholder="Untitled monologue" value="${esc(S.cur?S.cur.title:"")}">
+      <div style="height:14px"></div>
+      <label class="fld" for="raw">Script</label>
+      <textarea id="raw" rows="12" placeholder="Paste your monologue here.">${esc(raw)}</textarea>
+      <div class="rules" style="margin-top:10px">
+        Formatting, read once and fix as needed:
+        blank line = new beat · each sentence becomes a chunk ·
+        prefix another character with <code>NAME:</code> to make it a spoken cue you do not memorize.
+      </div>
+    </div>
+    <div class="card">
+      <h2>Voices</h2>
+      <div class="row">
+        <div>
+          <label class="fld">Your lines <span class="faint">(playback / confirm)</span></label>
+          <select id="youVoice">${vOpts(S.settings.youVoice)}</select>
+        </div>
+        <div>
+          <label class="fld">Cue lines <span class="faint">(other characters)</span></label>
+          <select id="cueVoice">${vOpts(S.settings.cueVoice)}</select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn small ghost" id="testYou">▶ Test your voice</button>
+        <button class="btn small ghost" id="testCue">▶ Test cue voice</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Chunks <span class="pill">${chunks.length}</span></h2>
+      <div id="preview">${preview}</div>
+    </div>
+    <div class="row">
+      <button class="btn primary block" id="save">Save</button>
+      ${S.cur?`<button class="btn danger" id="delete" style="flex:0 0 auto">Delete</button>`:""}
+    </div>
+    <div style="height:24px"></div>`;
+}
+
+function viewRehearse(){
+  const s=S.cur, set=S.settings;
+  const total=s.chunks.length;
+  const names=["Listen","Echo","Lead-in","Recall","Off book"];
+  const lv=names.map((n,i)=>`<button class="lv ${set.level===i+1?"on":""}" data-lv="${i+1}">${i+1} · ${n}</button>`).join("");
+  return `
+    <div class="backbar">
+      <button class="btn ghost small" id="back">◂ Library</button>
+      <button class="btn ghost small" id="edit" style="margin-left:auto">Edit</button>
+    </div>
+    <div class="levels">${lv}</div>
+
+    <div class="stage" id="stage">
+      <div class="phase" id="phase">Ready</div>
+      <div class="cur" id="cur">Press play to begin.</div>
+      <div class="nxt" id="nxt"></div>
+    </div>
+
+    <div class="progress"><i id="bar"></i></div>
+    <div class="muted" id="counter" style="text-align:center;margin-bottom:14px">Chunk 0 / ${total}</div>
+
+    <div class="transport">
+      <button class="round" id="back1" title="Previous">⏮</button>
+      <button class="bigplay" id="play">▶ Play</button>
+      <button class="round" id="fwd1" title="Next">⏭</button>
+    </div>
+    <button class="hint" id="hintBtn">💡 Hint — say the lead-in</button>
+    <div class="ctlrow">
+      <button class="btn" id="repeat">↻ Repeat chunk</button>
+      <button class="btn" id="restart">⟲ Restart</button>
+    </div>
+
+    <div class="card settings">
+      <div class="set-row">
+        <label>Pace</label>
+        <input type="range" id="pace" min="0.6" max="1.8" step="0.1" value="${set.pace}">
+        <span class="val" id="paceV">${set.pace.toFixed(1)}×</span>
+      </div>
+      <div class="set-row">
+        <label>From</label>
+        <input type="range" id="rs" min="1" max="${total}" step="1" value="${(set.rangeStart||0)+1}">
+        <span class="val" id="rsV"></span>
+      </div>
+      <div class="set-row">
+        <label>To</label>
+        <input type="range" id="re" min="1" max="${total}" step="1" value="${set.rangeEnd<0?total:set.rangeEnd+1}">
+        <span class="val" id="reV"></span>
+      </div>
+      <label class="toggle"><input type="checkbox" id="loop" ${set.loop?"checked":""}> Loop this range</label>
+    </div>
+    <div style="height:24px"></div>`;
+}
+
+/* =========================================================
+   WIRING
+========================================================= */
+function wire(){
+  if(S.view==="library") wireLibrary();
+  else if(S.view==="edit") wireEdit();
+  else wireRehearse();
+}
+function $(id){return document.getElementById(id);}
+function on(id,ev,fn){const e=$(id);if(e)e.addEventListener(ev,fn);}
+
+function wireLibrary(){
+  on("new","click",()=>{ S.cur=null; S.draft=""; S.view="edit"; render(); });
+  document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",async e=>{
+    const id=e.currentTarget.getAttribute("data-open");
+    const s=await loadScript(id);
+    if(s){ S.cur=s; S.settings.rangeStart=0; S.settings.rangeEnd=-1; S.view="rehearse"; render(); }
+  }));
+}
+
+function wireEdit(){
+  on("back","click",()=>{ S.view = S.cur?"rehearse":"library"; render(); });
+  const raw=$("raw");
+  raw.addEventListener("input",()=>{
+    S.draft=raw.value;
+    const chunks=parseChunks(S.draft);
+    const p=$("preview");
+    p.innerHTML = chunks.length ? chunks.map((c,i)=>`
+      <div class="chunk ${c.cue?"cue":""} ${c.beat&&i>0?"beat":""}">
+        <span class="n">${i+1}</span>${c.cue?`<span class="who">${esc(c.speaker)}</span>`:""}${esc(c.text)}
+      </div>`).join("") : `<div class="faint">Paste text above to see the chunks.</div>`;
+    document.querySelectorAll(".card h2 .pill").forEach(el=>{if(el.parentElement.textContent.includes("Chunks"))el.textContent=chunks.length;});
+  });
+  on("youVoice","change",e=>{S.settings.youVoice=e.target.value;saveSettings();});
+  on("cueVoice","change",e=>{S.settings.cueVoice=e.target.value;saveSettings();});
+  on("testYou","click",()=>{TTS.cancel();TTS.speak("This is how your lines will sound when the app reads them back.",{voiceURI:$("youVoice").value,rate:1});});
+  on("testCue","click",()=>{TTS.cancel();TTS.speak("And this voice reads the other characters.",{voiceURI:$("cueVoice").value,rate:1});});
+  on("save","click",async()=>{
+    const title=($("title").value||"Untitled monologue").trim();
+    const chunks=parseChunks($("raw").value);
+    if(!chunks.length){ alert("Nothing to save yet. Paste your monologue first."); return; }
+    if(!S.settings.youVoice){const v=TTS.listVoices();if(v[0])S.settings.youVoice=v[0].voiceURI;if(v[1])S.settings.cueVoice=v[1].voiceURI;else if(v[0])S.settings.cueVoice=v[0].voiceURI;}
+    await saveSettings();
+    const s=S.cur||{id:uid()};
+    s.title=title; s.chunks=chunks; s.rawText=$("raw").value;
+    await saveScript(s);
+    S.cur=s; S.settings.rangeStart=0; S.settings.rangeEnd=-1;
+    S.view="rehearse"; render();
+  });
+  on("delete","click",async()=>{
+    if(S.cur && confirm("Delete this piece?")){ await delScript(S.cur.id); S.cur=null; S.view="library"; render(); }
+  });
+}
+
+/* ---------- rehearsal engine ---------- */
+const Engine={
+  steps:[], chunkStart:[], pos:0, running:false, timer:null, wake:null,
+  curChunk:0,
+
+  build(){
+    const s=S.cur, set=S.settings, pace=set.pace;
+    const a=set.rangeStart||0, b=(set.rangeEnd<0?s.chunks.length-1:set.rangeEnd);
+    const you=set.youVoice, cue=set.cueVoice||set.youVoice;
+    const gap=Math.round(320*pace);
+    this.steps=[]; this.chunkStart=[];
+    for(let ci=a; ci<=b && ci<s.chunks.length; ci++){
+      const c=s.chunks[ci];
+      this.chunkStart[ci]=this.steps.length;
+      const push=(o)=>this.steps.push(Object.assign({ci},o));
+      if(c.cue){
+        push({type:"speak",text:c.text,voice:cue,tag:"cue",who:c.speaker});
+      }else{
+        switch(set.level){
+          case 1: push({type:"speak",text:c.text,voice:you,tag:"read"}); break;
+          case 2: push({type:"speak",text:c.text,voice:you,tag:"read"});
+                  push({type:"pause",ms:durMs(c.text,pace),tag:"echo"}); break;
+          case 3: push({type:"speak",text:leadIn(c.text),voice:you,tag:"lead"});
+                  push({type:"pause",ms:durMs(c.text,pace),tag:"you"});
+                  push({type:"speak",text:c.text,voice:you,tag:"confirm"}); break;
+          case 4: push({type:"pause",ms:durMs(c.text,pace),tag:"you"});
+                  push({type:"speak",text:c.text,voice:you,tag:"confirm"}); break;
+          case 5: push({type:"pause",ms:durMs(c.text,pace),tag:"silent"}); break;
+        }
+      }
+      push({type:"pause",ms:gap,tag:"gap"});
+    }
+    this.rangeA=a; this.rangeB=b;
+  },
+
+  async play(){
+    if(!this.steps.length) this.build();
+    this.running=true; setPlayUI(true); this.acquireWake();
+    this.run();
+  },
+  run(){
+    if(!this.running) return;
+    if(this.pos>=this.steps.length){ this.end(); return; }
+    const st=this.steps[this.pos];
+    this.curChunk=st.ci;
+    paint(st);
+    if(st.type==="speak"){
+      TTS.speak(st.text,{voiceURI:st.voice,rate:1,onend:()=>{ if(!this.running)return; this.pos++; this.run(); }});
+    }else{
+      this.timer=setTimeout(()=>{ if(!this.running)return; this.pos++; this.run(); }, st.ms);
+    }
+  },
+  pause(){
+    this.running=false; setPlayUI(false);
+    TTS.cancel(); clearTimeout(this.timer); this.releaseWake();
+  },
+  toggle(){ this.running?this.pause():this.play(); },
+  stopHard(){ this.running=false; TTS.cancel(); clearTimeout(this.timer); this.releaseWake(); },
+
+  gotoChunk(ci){
+    ci=Math.max(this.rangeA??0, Math.min(ci, this.rangeB??(S.cur.chunks.length-1)));
+    const wasPlaying=this.running;
+    this.stopHard();
+    if(this.chunkStart[ci]==null) this.build();
+    this.pos=this.chunkStart[ci]||0;
+    this.curChunk=ci;
+    paint(this.steps[this.pos]);
+    if(wasPlaying){ this.running=true; setPlayUI(true); this.acquireWake(); this.run(); }
+    else setPlayUI(false);
+  },
+  repeat(){ this.gotoChunk(this.curChunk); if(!this.running){this.play();} },
+  next(){ this.gotoChunk(this.curChunk+1); },
+  prev(){ this.gotoChunk(this.curChunk-1); },
+  restart(){ this.gotoChunk(this.rangeA??0); },
+
+  hint(){
+    const c=S.cur.chunks[this.curChunk]; if(!c)return;
+    const wasPlaying=this.running;
+    this.running=false; TTS.cancel(); clearTimeout(this.timer);
+    const phase=$("phase"); if(phase)phase.textContent="Hint";
+    TTS.speak(leadIn(c.text),{voiceURI:S.settings.youVoice,rate:1,onend:()=>{
+      if(wasPlaying){ this.running=true; this.run(); }
+    }});
+  },
+
+  end(){
+    if(S.settings.loop){ this.pos=this.chunkStart[this.rangeA??0]||0; this.run(); return; }
+    this.running=false; setPlayUI(false); this.releaseWake();
+    const phase=$("phase"), cur=$("cur"), nxt=$("nxt");
+    if(phase)phase.textContent="Done"; if(cur)cur.textContent="End of range."; if(nxt)nxt.textContent="";
+  },
+  rebuild(){ const keep=this.curChunk; this.stopHard(); this.steps=[]; this.build(); this.pos=this.chunkStart[Math.min(keep,this.rangeB)]||0; setPlayUI(false); paint(this.steps[this.pos]); },
+
+  async acquireWake(){ try{ if("wakeLock" in navigator){ this.wake=await navigator.wakeLock.request("screen"); } }catch(e){} },
+  releaseWake(){ try{ if(this.wake){ this.wake.release(); this.wake=null; } }catch(e){} }
+};
+
+const PHASE={read:"Reading",lead:"Lead-in",you:"Your turn",confirm:"Confirm",echo:"Say it back",silent:"Off book",cue:"Cue",gap:""};
+function paint(st){
+  if(!st)return;
+  const s=S.cur, total=s.chunks.length, ci=st.ci;
+  const c=s.chunks[ci], nc=s.chunks[ci+1];
+  const phase=$("phase"), cur=$("cur"), nxt=$("nxt"), bar=$("bar"), counter=$("counter");
+  if(st.tag==="gap") return;
+  if(phase) phase.textContent=PHASE[st.tag]||"";
+  if(cur){
+    cur.classList.toggle("cue", !!c.cue);
+    if(st.tag==="you"||st.tag==="silent"||st.tag==="echo"){
+      cur.innerHTML=`<span class="silent">• your line •</span>`;
+    }else if(c.cue){
+      cur.innerHTML=`<span class="whoTag">${esc(c.speaker||"cue")}</span>${esc(c.text)}`;
+    }else if(st.tag==="lead"){
+      cur.innerHTML=esc(leadIn(c.text));
+    }else{
+      cur.textContent=c.text;
+    }
+  }
+  if(nxt){ nxt.textContent = nc ? "next: "+ (nc.cue?("["+nc.speaker+"] "):"") + (nc.text.length>90?nc.text.slice(0,90)+"…":nc.text) : ""; }
+  if(bar){ const span=(Engine.rangeB-Engine.rangeA)||1; bar.style.width=Math.round(((ci-Engine.rangeA)/span)*100)+"%"; }
+  if(counter){ counter.textContent=`Chunk ${ci+1} / ${total}`; }
+}
+function setPlayUI(on){
+  const p=$("play"); if(!p)return;
+  p.classList.toggle("playing",on);
+  p.innerHTML = on ? "⏸ Pause" : "▶ Play";
+}
+
+function wireRehearse(){
+  Engine.stopHard(); Engine.steps=[]; Engine.pos=0; Engine.curChunk=S.settings.rangeStart||0;
+  const set=S.settings, total=S.cur.chunks.length;
+  const rsV=$("rsV"), reV=$("reV");
+  if(rsV)rsV.textContent=(set.rangeStart||0)+1;
+  if(reV)reV.textContent=(set.rangeEnd<0?total:set.rangeEnd+1);
+
+  document.querySelectorAll("[data-lv]").forEach(b=>b.addEventListener("click",e=>{
+    set.level=+e.currentTarget.getAttribute("data-lv"); saveSettings();
+    document.querySelectorAll("[data-lv]").forEach(x=>x.classList.remove("on"));
+    e.currentTarget.classList.add("on");
+    Engine.rebuild();
+  }));
+  on("play","click",()=>Engine.toggle());
+  on("hintBtn","click",()=>Engine.hint());
+  on("repeat","click",()=>Engine.repeat());
+  on("restart","click",()=>Engine.restart());
+  on("back1","click",()=>Engine.prev());
+  on("fwd1","click",()=>Engine.next());
+  on("back","click",()=>{ Engine.stopHard(); S.view="library"; render(); });
+  on("edit","click",()=>{ Engine.stopHard(); S.draft=S.cur.rawText||S.cur.chunks.map(c=>(c.cue?c.speaker+": ":"")+c.text).join("\n"); S.view="edit"; render(); });
+
+  on("pace","input",e=>{ set.pace=+e.target.value; $("paceV").textContent=set.pace.toFixed(1)+"×"; });
+  on("pace","change",()=>{ saveSettings(); Engine.rebuild(); });
+  on("rs","input",e=>{ let v=+e.target.value-1; if(v>(set.rangeEnd<0?total-1:set.rangeEnd))v=(set.rangeEnd<0?total-1:set.rangeEnd); set.rangeStart=v; $("rsV").textContent=v+1; e.target.value=v+1; });
+  on("rs","change",()=>{ saveSettings(); Engine.rebuild(); });
+  on("re","input",e=>{ let v=+e.target.value-1; if(v<set.rangeStart)v=set.rangeStart; set.rangeEnd=v; $("reV").textContent=v+1; e.target.value=v+1; });
+  on("re","change",()=>{ saveSettings(); Engine.rebuild(); });
+  on("loop","change",e=>{ set.loop=e.target.checked; saveSettings(); });
+
+  Engine.build(); paint(Engine.steps[0]);
+}
+
+document.addEventListener("visibilitychange",()=>{ if(document.hidden && Engine.running){ /* keep running; iOS may pause speech */ } });
+boot();
+</script>
+</body>
+</html>
