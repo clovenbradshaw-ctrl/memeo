@@ -542,6 +542,11 @@ const S={
    parsed as structure (beats / cue speakers) and are never spoken aloud, so
    it won't read "Chunk one" or "Friedrich". Fyodor and Monk become cues. */
 const SEED_TITLE="The Things of Friends";
+/* Pre-computed alignment for the provided recording (~1KB; the audio itself is NOT bundled).
+   Lets the built-in piece align instantly when that exact recording is attached; a different
+   take just auto-aligns on attach. */
+const SEED_AUDIO_DUR=690.5175;
+const SEED_MARKS=[0.16,8.24,20.34,30.12,31.78,33.54,46.88,59.08,60.56,65.4,71.46,89.42,90.84,96.56,110.18,112.52,121.08,127.7,129.06,134.38,139.5,152.62,155.76,157.18,163.56,176.44,179.1,193.98,205.68,206.78,212.84,223.58,226,234.16,235.84,240.38,246.18,249.92,255.66,264.14,270.26,275.38,296.9,306.88,307.84,311.04,313.48,320.34,325.44,329.3,331.66,340.4,342.36,344.02,346.94,353.46,354.68,356.48,359.22,362.1,364.9,367.64,371.48,374.7,376.6,378.66,380.8,383.04,394.14,399.48,402.86,423.74,430.6,433.86,436.38,444.58,451.76,459.6,469.64,475.22,479.3,482.1,485.22,486.3,488.86,491.92,493.94,496.74,499.7,502.46,506.3,508.86,511.84,514.82,518,520.94,524.1,526.44,530.8,533.34,536.12,539.34,542.88,546.22,548.98,551.62,554.64,557.5,561.14,563.08,568.4,570.56,573.2,577.06,581.92,584.58,587.38,592.3,594.08,596.18,602.58,603.38,604.3,607.18,611,614.04,626.12,632.58,634.02,636.46,645.86,651.22,653.04,656.6,662.22,664.14,665.38,672.26,675.76,678.54,682.22];
 const SEED_TEXT=`## Chunk 1 — The Weekly Appointment
 
 FRIEDRICH
@@ -728,7 +733,11 @@ async function maybeSeed(){
   await Store.set("lr:seeded",1);
   const chunks=parseChunks(SEED_TEXT);
   if(!chunks.length) return;
-  const s={id:uid(),title:SEED_TITLE,chunks,rawText:SEED_TEXT,marks:new Array(chunks.length).fill(null)};
+  const marks=(typeof SEED_MARKS!=="undefined" && Array.isArray(SEED_MARKS) && SEED_MARKS.length===chunks.length)
+    ? SEED_MARKS.slice() : new Array(chunks.length).fill(null);
+  const s={id:uid(),title:SEED_TITLE,chunks,rawText:SEED_TEXT,marks,
+           seedDur:(typeof SEED_AUDIO_DUR!=="undefined"?SEED_AUDIO_DUR:0),
+           autoAligned:marks.some(x=>x!=null)};
   await saveScript(s);
 }
 
@@ -805,10 +814,19 @@ async function attachAudio(blob,name){
   catch(e){ alert("Couldn’t save the recording — it may be too large for this browser’s storage."); return; }
   s.audioName=name||"recording";
   s.audioDur=await probeDuration(blob);
-  s.marks=new Array(s.chunks.length).fill(null);
-  await saveScript(s);
-  render();
-  await runAutoAlign(s, {silentFail:true});   // try to line it up automatically on attach
+  const n=s.chunks.length;
+  const preAligned = Array.isArray(s.marks) && s.marks.length===n && s.marks.every(x=>x!=null);
+  const durMatch = s.seedDur && Math.abs((s.audioDur||0)-s.seedDur) < 4;
+  if(preAligned && durMatch){                  // built-in timings already fit this recording
+    s.autoAligned=true;
+    await saveScript(s);
+    render();
+  }else{
+    s.marks=new Array(n).fill(null);
+    await saveScript(s);
+    render();
+    await runAutoAlign(s, {silentFail:true});   // line it up automatically on attach
+  }
 }
 
 /* =========================================================
