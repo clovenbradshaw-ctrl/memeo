@@ -315,16 +315,18 @@ const Ear=(function(){
   function collect(e){ let t=""; for(let i=0;i<e.results.length;i++){ t+=e.results[i][0].transcript+" "; } return t.trim(); }
   return {
     supported(){ return !!SR; },
-    start({onresult,onend}={}){
+    // recognition needs a secure context (https / localhost); file:// won't work
+    usable(){ try{ return !!SR && (window.isSecureContext!==false); }catch(e){ return !!SR; } },
+    start({onresult,onerror,onend}={}){
       if(!SR) return false;
       try{
         rec=new SR();
         rec.lang="en-US"; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=1;
         rec.onresult=e=>{ if(onresult) onresult(collect(e)); };
-        rec.onerror=()=>{};
+        rec.onerror=e=>{ if(onerror) onerror((e&&e.error)||"error"); };
         rec.onend=()=>{ on=false; if(onend) onend(); };
         rec.start(); on=true; return true;
-      }catch(e){ on=false; return false; }
+      }catch(e){ on=false; if(onerror) onerror("start-failed"); return false; }
     },
     stop(){ if(rec){ try{ rec.stop(); }catch(e){} } on=false; },
     abort(){ if(rec){ try{ rec.abort(); }catch(e){} rec=null; } on=false; }
@@ -429,7 +431,10 @@ function audioSeg(ci){                                  // {start,end} of chunk 
   const s=S.cur; if(!s||!Rec.ready()||!Array.isArray(s.marks)) return null;
   const start=s.marks[ci]; if(start==null) return null;
   let end=null;
-  for(let j=ci+1;j<s.marks.length;j++){ if(s.marks[j]!=null){ end=s.marks[j]; break; } }
+  // a precise per-line end (from transcript alignment) wins — it trims spoken
+  // headers/gaps that sit between one line and the next
+  if(Array.isArray(s.ends) && s.ends[ci]!=null && s.ends[ci]>start) end=s.ends[ci];
+  if(end==null){ for(let j=ci+1;j<s.marks.length;j++){ if(s.marks[j]!=null){ end=s.marks[j]; break; } } }
   if(end==null){ const d=s.audioDur||Rec.duration(); end=d>start?d:start+3; }
   return end>start ? {start,end} : null;
 }
@@ -545,8 +550,9 @@ const SEED_TITLE="The Things of Friends";
 /* Pre-computed alignment for the provided recording (~1KB; the audio itself is NOT bundled).
    Lets the built-in piece align instantly when that exact recording is attached; a different
    take just auto-aligns on attach. */
-const SEED_AUDIO_DUR=690.5175;
-const SEED_MARKS=[0.16,8.24,20.34,30.12,31.78,33.54,46.88,59.08,60.56,65.4,71.46,89.42,90.84,96.56,110.18,112.52,121.08,127.7,129.06,134.38,139.5,152.62,155.76,157.18,163.56,176.44,179.1,193.98,205.68,206.78,212.84,223.58,226,234.16,235.84,240.38,246.18,249.92,255.66,264.14,270.26,275.38,296.9,306.88,307.84,311.04,313.48,320.34,325.44,329.3,331.66,340.4,342.36,344.02,346.94,353.46,354.68,356.48,359.22,362.1,364.9,367.64,371.48,374.7,376.6,378.66,380.8,383.04,394.14,399.48,402.86,423.74,430.6,433.86,436.38,444.58,451.76,459.6,469.64,475.22,479.3,482.1,485.22,486.3,488.86,491.92,493.94,496.74,499.7,502.46,506.3,508.86,511.84,514.82,518,520.94,524.1,526.44,530.8,533.34,536.12,539.34,542.88,546.22,548.98,551.62,554.64,557.5,561.14,563.08,568.4,570.56,573.2,577.06,581.92,584.58,587.38,592.3,594.08,596.18,602.58,603.38,604.3,607.18,611,614.04,626.12,632.58,634.02,636.46,645.86,651.22,653.04,656.6,662.22,664.14,665.38,672.26,675.76,678.54,682.22];
+const SEED_AUDIO_DUR=690.52;   /* full file length (transcript ends ~685s; trailing silence after) */
+const SEED_MARKS=[4.351,12.074,22.431,30.132,31.816,33.58,42.945,56.558,59.21,64.029,69.443,84.061,86.245,90.944,107.053,110.195,116.609,123.183,123.488,129.115,132.146,144.257,146.519,149.887,154.379,169.929,172.498,184.155,192.08,192.5,198.62,208.92,213.98,222.256,223.555,228.607,234.14,235.888,242.303,249.948,254.109,260.536,279.813,289.531,291.78,294.671,296.933,305.825,307.892,314.397,320.325,326.171,328.284,330.638,335.154,340.477,342.478,344.107,346.991,350.806,353.475,356.515,359.273,365.022,367.691,373.177,374.785,378.68,386.952,392.397,395.625,417.841,424.878,428.982,430.585,436.357,444.615,451.83,466.501,469.713,473.006,476.315,479.431,480.33,483.446,486.352,490.35,493.963,496.789,499.76,504.015,506.423,508.896,511.803,514.855,518.051,521.022,524.154,526.499,529.149,533.47,537.48,539.34,542.851,546.298,549.023,551.668,554.65,557.519,563.083,566.637,570.63,573.231,575.897,578.74,581.986,589.274,594.977,597.082,599.09,603.412,604.376,607.284,611.124,614.915,617.95,628.884,635.162,636.591,640.641,645.93,651.25,653.034,656.675,662.212,664.282,666.305,672.244,675.776,679.211,682.342];
+const SEED_ENDS=[11.673,21.965,29.747,30.982,33.067,42.352,53.03,58.656,63.25,68.907,83.56,85.663,90.279,101.799,109.698,116.08,122.606,123.439,128.506,131.729,142.204,146.086,149.486,153.93,164.486,171.904,183.561,192.08,192.5,198.58,206.94,209.6,221.759,223.09,228.19,233.739,235.471,241.854,249.53,253.611,259.942,279.332,286.784,291.362,293.193,296.356,303.23,307.299,313.083,317.281,324.971,326.881,330.106,334.299,339.977,341.945,343.494,346.476,350.292,352.961,355.84,358.721,364.518,367.193,369.252,374.287,378.167,386.47,391.449,395.111,417.312,424.397,428.501,430.072,435.86,444.086,451.397,462.196,468.171,472.476,475.929,478.708,479.8,483.029,485.758,489.772,493.289,496.275,499.358,503.421,505.813,508.414,511.289,514.228,517.665,520.589,523.801,525.439,528.796,532.892,535.605,538.971,542.386,545.817,548.622,551.091,554.137,557.022,562.566,566.12,569.997,572.778,575.412,578.191,581.434,584.096,593.596,595.684,598.689,602.095,603.991,605.919,610.626,613.582,617.468,628.194,634.552,635.901,640.641,645.387,649.626,652.519,655.258,660.942,663.736,664.994,671.554,674.957,678.023,681.78,685.087];
 const SEED_TEXT=`## Chunk 1 — The Weekly Appointment
 
 FRIEDRICH
@@ -735,7 +741,9 @@ async function maybeSeed(){
   if(!chunks.length) return;
   const marks=(typeof SEED_MARKS!=="undefined" && Array.isArray(SEED_MARKS) && SEED_MARKS.length===chunks.length)
     ? SEED_MARKS.slice() : new Array(chunks.length).fill(null);
-  const s={id:uid(),title:SEED_TITLE,chunks,rawText:SEED_TEXT,marks,
+  const ends=(typeof SEED_ENDS!=="undefined" && Array.isArray(SEED_ENDS) && SEED_ENDS.length===chunks.length)
+    ? SEED_ENDS.slice() : null;
+  const s={id:uid(),title:SEED_TITLE,chunks,rawText:SEED_TEXT,marks,ends,
            seedDur:(typeof SEED_AUDIO_DUR!=="undefined"?SEED_AUDIO_DUR:0),
            autoAligned:marks.some(x=>x!=null)};
   await saveScript(s);
@@ -816,13 +824,13 @@ async function attachAudio(blob,name){
   s.audioDur=await probeDuration(blob);
   const n=s.chunks.length;
   const preAligned = Array.isArray(s.marks) && s.marks.length===n && s.marks.every(x=>x!=null);
-  const durMatch = s.seedDur && Math.abs((s.audioDur||0)-s.seedDur) < 4;
+  const durMatch = s.seedDur && Math.abs((s.audioDur||0)-s.seedDur) < 8;
   if(preAligned && durMatch){                  // built-in timings already fit this recording
-    s.autoAligned=true;
+    s.autoAligned=true;                         // keep s.ends (precise per-line boundaries)
     await saveScript(s);
     render();
   }else{
-    s.marks=new Array(n).fill(null);
+    s.marks=new Array(n).fill(null); s.ends=null;
     await saveScript(s);
     render();
     await runAutoAlign(s, {silentFail:true});   // line it up automatically on attach
@@ -1018,7 +1026,8 @@ function viewRehearse(){
       <button class="btn ghost small" id="edit" style="margin-left:auto">Edit</button>
     </div>
     ${ladder}
-    <div class="muted" id="srcline" style="text-align:center;margin:-8px 0 12px;font-size:12px">${recSourceLabel()}</div>
+    <div class="muted" id="srcline" style="text-align:center;margin:-8px 0 6px;font-size:12px">${recSourceLabel()}</div>
+    <div id="micstatus" style="text-align:center;margin:0 0 12px;font-size:12px;color:var(--accent);display:none"></div>
 
     <div class="stage" id="stage">
       <div class="phase" id="phase">Ready</div>
@@ -1042,10 +1051,10 @@ function viewRehearse(){
     </div>
 
     <div class="card settings">
-      <label class="toggle" style="margin-bottom:14px${Ear.supported()?"":";opacity:.5"}">
-        <input type="checkbox" id="coach" ${set.listen?"checked":""} ${Ear.supported()?"":"disabled"}>
+      <label class="toggle" style="margin-bottom:14px${Ear.usable()?"":";opacity:.5"}">
+        <input type="checkbox" id="coach" ${set.listen?"checked":""} ${Ear.usable()?"":"disabled"}>
         🎧 Coach me — listen and wait until I say each line
-        ${Ear.supported()?"":`<span class="faint">(this browser can’t listen — use Chrome)</span>`}
+        ${Ear.usable()?"":`<span class="faint">(${Ear.supported()?"open over https to let it listen":"this browser can’t listen — use Chrome"})</span>`}
       </label>
       <div class="set-row">
         <label>Pace</label>
@@ -1165,7 +1174,7 @@ function wireEdit(){
 }
 
 /* ---------- rehearsal engine ---------- */
-function coachOn(){ return !!(S.settings.listen && Ear.supported()); }
+function coachOn(){ return !!(S.settings.listen && Ear.usable()); }
 /* Speak one chunk's line — the recording if it's aligned, else the robot voice. */
 function speakLine(ci,done){
   const seg=audioSeg(ci);
@@ -1215,8 +1224,24 @@ const Engine={
 
   async play(){
     if(!this.steps.length) this.build();
+    if(coachOn() && !this.noEar && !this._micPrimed){ await this.primeMic(); updateMicStatus(); }
     this.running=true; setPlayUI(true); this.acquireWake();
     this.run();
+  },
+  // Ask for the mic up front so the browser shows a clear prompt and we learn
+  // immediately if it's blocked — rather than the recognizer flapping silently.
+  async primeMic(){
+    this._micPrimed=true;
+    if(!Ear.usable()){ this.noEar=true; this.micMsg="This page can’t listen — open it over https (or in Chrome), then press Play."; return; }
+    if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return;
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+      this.micMsg="";
+    }catch(e){
+      this.noEar=true;
+      this.micMsg="Microphone is blocked. Allow mic access for this page, then press Play.";
+    }
   },
   run(){
     if(!this.running) return;
@@ -1236,11 +1261,13 @@ const Engine={
      on its own — if you go quiet without getting it, it hands the line back. */
   listenStep(ci, done){
     const self=this;
+    if(this.noEar || !Ear.usable()){ this.timedTurn(ci, done); return; }   // mic unavailable → timed turn
     const c=S.cur.chunks[ci], expected=c.text, thr=matchThreshold(expected);
     let committed="", curT="", heard="", started=false, lastGrow=Date.now(), finished=false, phase="listen";
+    let gotAny=false, armCount=0, startedAt=Date.now();
     const H=()=>$("heard");
-    const setHeard=()=>{ heard=(committed+" "+curT).trim(); const h=H(); if(h) h.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : ""; };
-    const prompt=()=>{ const p=$("phase"),cu=$("cur"); if(p)p.textContent="🎧 Your turn — say it"; if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`; const h=H(); if(h)h.textContent=""; };
+    const setHeard=()=>{ heard=(committed+" "+curT).trim(); const h=H(); if(h) h.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : "🎤 listening…"; };
+    const prompt=()=>{ const p=$("phase"),cu=$("cur"); if(p)p.textContent="🎤 Your turn — say it"; if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`; const h=H(); if(h)h.textContent="🎤 listening…"; };
     const succeed=()=>{
       if(finished)return; finished=true; self.clearListen();
       self.got[ci]=true;
@@ -1249,36 +1276,67 @@ const Engine={
       updateCounter();
       self.timer=setTimeout(()=>{ if(self.running) done(); }, 600);
     };
+    const fail=(msg)=>{                            // recognition can't run → explain + fall back to timed turns
+      if(finished)return; finished=true; self.clearListen();
+      self.noEar=true; self.micMsg=msg||"Couldn’t use the microphone."; updateMicStatus();
+      self.timedTurn(ci, done);
+    };
     const arm=()=>{
+      armCount++;
       Ear.start({
         onresult:(t)=>{
           if(finished)return;
-          curT=t||""; if(curT){ started=true; lastGrow=Date.now(); }
+          gotAny=true; curT=t||""; if(curT){ started=true; lastGrow=Date.now(); }
           setHeard();
           if(seqMatch(expected,heard)>=thr) succeed();
         },
-        onend:()=>{ if(finished||!self.running)return; committed=(committed+" "+curT).trim(); curT=""; if(phase==="listen") arm(); }
+        onerror:(err)=>{
+          if(finished)return;
+          if(err==="not-allowed"||err==="service-not-allowed") fail("Microphone is blocked. Allow mic access for this page, then press Play.");
+          else if(err==="audio-capture") fail("No microphone found — check your mic and try again.");
+          else if(err==="network") fail("Speech recognition needs an internet connection.");
+          // no-speech / aborted / other: benign — onend re-arms
+        },
+        onend:()=>{
+          if(finished||!self.running||phase!=="listen")return;
+          committed=(committed+" "+curT).trim(); curT="";
+          if(self._reArm)return;
+          self._reArm=setTimeout(()=>{ self._reArm=null; if(!finished&&self.running&&phase==="listen") arm(); }, 300);  // debounce → no mic-blink storm
+        }
       });
     };
     const represent=()=>{                          // hand the line back, then listen fresh
       if(finished||!self.running)return;
-      phase="give"; Ear.stop();
+      phase="give"; Ear.stop(); if(self._reArm){ clearTimeout(self._reArm); self._reArm=null; }
       committed=""; curT=""; heard=""; started=false;
       const p=$("phase"),cu=$("cur"); if(p)p.textContent="Here it is — say it after me";
       if(cu){ if(c.cue) cu.innerHTML=`<span class="whoTag">${esc(c.speaker||"cue")}</span>${esc(c.text)}`; else cu.textContent=c.text; }
-      speakLine(ci, ()=>{ if(finished||!self.running)return; phase="listen"; lastGrow=Date.now(); prompt(); arm(); });
+      speakLine(ci, ()=>{ if(finished||!self.running)return; phase="listen"; lastGrow=Date.now(); startedAt=Date.now(); gotAny=false; armCount=0; prompt(); arm(); });
     };
     // begin: mic open, watch speech activity
     phase="listen"; prompt(); arm();
     this.poll=setInterval(()=>{
       if(finished||!self.running){ self.clearListen(); return; }
       if(phase!=="listen") return;                 // don't nudge while re-giving the line
+      if(!gotAny && armCount>=4 && (Date.now()-startedAt)>5000){   // flapping with no transcript ⇒ mic not capturing
+        fail("Can’t hear the microphone. Check this page has mic permission and is opened over https."); return;
+      }
       const idle=Date.now()-lastGrow;
-      if(!started){ if(idle>9000) represent(); }    // stuck, never started → give it again
-      else if(idle>1900) represent();               // finished an attempt that wasn't right → give it again
+      if(!started){ if(idle>10000) represent(); }   // never started → give it again
+      else if(idle>2500) represent();               // stopped without getting it → give it again
     }, 350);
   },
-  clearListen(){ if(this.poll){ clearInterval(this.poll); this.poll=null; } try{ Ear.abort(); }catch(e){} },
+  timedTurn(ci, done){
+    // No mic: show the line, give time to say it aloud, then move on.
+    const self=this, c=S.cur.chunks[ci];
+    const p=$("phase"),cu=$("cur"),h=$("heard");
+    if(p)p.textContent="🗣️ Your turn — say it";
+    if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`;
+    if(h)h.innerHTML = self.micMsg ? `<span style="color:var(--accent)">${esc(self.micMsg)}</span>` : "";
+    const ms=Math.max(2600, durMs(c.text, S.settings.pace));
+    this.timer=setTimeout(()=>{ if(self.running) done(); }, ms);
+  },
+  clearListen(){ if(this.poll){ clearInterval(this.poll); this.poll=null; } if(this._reArm){ clearTimeout(this._reArm); this._reArm=null; } try{ Ear.abort(); }catch(e){} },
 
   pause(){
     this.running=false; setPlayUI(false);
@@ -1335,6 +1393,11 @@ function updateCounter(){
   let got=0; for(const k in Engine.got){ if(Engine.got[k]) got++; }
   counter.textContent = `Chunk ${ci+1} / ${total}` + (got?` · ✓ ${got}`:"");
 }
+function updateMicStatus(){
+  const el=$("micstatus"); if(!el)return;
+  el.textContent = Engine.micMsg || "";
+  el.style.display = Engine.micMsg ? "block" : "none";
+}
 function paint(st){
   if(!st)return;
   const s=S.cur, ci=st.ci;
@@ -1367,10 +1430,12 @@ function setPlayUI(on){
 
 function wireRehearse(){
   Engine.stopHard(); Engine.steps=[]; Engine.pos=0; Engine.curChunk=S.settings.rangeStart||0;
+  Engine.noEar=false; Engine.micMsg=""; Engine._micPrimed=false;   // fresh mic attempt each session
   const set=S.settings, total=S.cur.chunks.length;
   const rsV=$("rsV"), reV=$("reV");
   if(rsV)rsV.textContent=(set.rangeStart||0)+1;
   if(reV)reV.textContent=(set.rangeEnd<0?total:set.rangeEnd+1);
+  updateMicStatus();
 
   // load the recording (if any) so coaching/playback can use it
   if(S.cur.audioName && Blobs.ok() && !Rec.ready()){
