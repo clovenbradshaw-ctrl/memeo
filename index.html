@@ -1253,18 +1253,20 @@ const Engine={
     const p=$("phase"), cu=$("cur"), h=$("heard");
     if(p) p.textContent="🎤 Your turn";
     if(cu) cu.innerHTML=`<span class="silent">• say your line •</span>`;
-    if(h) h.textContent = Ear.usable() ? "press Space to speak · ⏭ to continue" : "press ⏭ or → to continue";
+    const canListen = Ear.usable() && !this.earDead;
+    if(h) h.textContent = canListen ? "press Space to speak · ⏭ to continue" : "press Space or ⏭ to continue";
   },
   // Space / Speak button — turn the mic on (or off). Off until you ask for it.
   async speakToggle(){
     if(!this.awaiting) return;
+    // if speech-check can't run here, Space just advances — one-key hand mode
+    if(this.earDead || !Ear.usable()){ this.advance(); return; }
     if(this.listening){ this.stopListen(); const h=$("heard"); if(h)h.textContent="press Space to speak · ⏭ to continue"; return; }
-    if(!Ear.usable()){ this.micMsg="This page can’t listen — open it over https in Chrome. Use ⏭ to continue."; updateMicStatus(); return; }
     if(!this._micPrimed){                          // one clear permission prompt
       this._micPrimed=true;
       if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
         try{ const s=await navigator.mediaDevices.getUserMedia({audio:true}); s.getTracks().forEach(t=>t.stop()); }
-        catch(e){ this.micMsg="Microphone is blocked. Allow mic access, or use ⏭ to continue."; updateMicStatus(); return; }
+        catch(e){ this.earDead=true; this.micMsg="Microphone blocked — allow it in the address bar, or just use Space / ⏭ to continue by hand."; updateMicStatus(); setSpeakUI(false); const h=$("heard"); if(h)h.textContent="press Space or ⏭ to continue"; return; }
       }
     }
     if(!this.awaiting) return;
@@ -1273,24 +1275,36 @@ const Engine={
   startListen(){
     const self=this, ci=this.awaiting.ci, expected=S.cur.chunks[ci].text, thr=matchThreshold(expected);
     this.listening=true; setSpeakUI(true); this.micMsg=""; updateMicStatus();
-    let committed="", curT="";
+    let committed="", curT="", netTries=0;
     const h=$("heard"); if(h) h.textContent="🎤 listening…";
     const show=()=>{ const heard=(committed+" "+curT).trim(); const e=$("heard"); if(e) e.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : "🎤 listening…"; };
-    const stopErr=(msg)=>{ self.micMsg=msg; updateMicStatus(); self.stopListen(); const e=$("heard"); if(e) e.textContent="press ⏭ to continue"; };
+    // speech-check is dead for this browser/session → switch to one-key hand mode
+    const die=(msg)=>{ self.earDead=true; self.micMsg=msg; updateMicStatus(); self.stopListen(); const e=$("heard"); if(e) e.textContent="press Space or ⏭ to continue"; };
     const arm=()=>{
       Ear.start({
         onresult:(t)=>{ if(!self.listening)return; curT=t||""; const heard=(committed+" "+curT).trim(); show(); if(seqMatch(expected,heard)>=thr) self.gotAdvance(ci); },
         onerror:(err)=>{
           if(!self.listening)return;
-          if(err==="not-allowed"||err==="service-not-allowed") stopErr("Mic blocked — allow it, or use ⏭ to continue.");
-          else if(err==="audio-capture") stopErr("No microphone found — use ⏭ to continue.");
-          else if(err==="network") stopErr("No internet for speech recognition — use ⏭ to continue.");
+          if(err==="network"){
+            // misleading Chrome error: really means the speech service is unreachable
+            // for this browser (works in Google Chrome). Retry a couple times, then hand mode.
+            if(netTries<2){ netTries++; if(self._reArm)return; self._reArm=setTimeout(()=>{ self._reArm=null; if(self.listening) arm(); },500); return; }
+            die("Speech check isn’t available in this browser (it needs Google Chrome) — rehearse by hand: Space or ⏭ to continue.");
+          }
+          else if(err==="not-allowed"||err==="service-not-allowed") die("Mic blocked — allow it, or just use Space / ⏭ to continue by hand.");
+          else if(err==="audio-capture") die("No microphone found — use Space / ⏭ to continue by hand.");
           // no-speech / aborted: benign — onend re-arms
         },
         onend:()=>{ if(!self.listening)return; committed=(committed+" "+curT).trim(); curT=""; if(self._reArm)return; self._reArm=setTimeout(()=>{ self._reArm=null; if(self.listening) arm(); },300); }
       });
     };
     arm();
+  },
+  advance(){                                        // move on by hand (no speaking)
+    if(!this.awaiting) return;
+    this.stopListen();
+    const d=this.awaiting.done; this.awaiting=null;
+    if(this.running && d) d();
   },
   stopListen(){ this.listening=false; setSpeakUI(false); if(this._reArm){ clearTimeout(this._reArm); this._reArm=null; } try{ Ear.abort(); }catch(e){} },
   gotAdvance(ci){                                  // recognized the line → mark + move on
@@ -1395,12 +1409,13 @@ function setPlayUI(on){
 function setSpeakUI(on){
   const b=$("speakBtn"); if(!b)return;
   b.classList.toggle("listening",on);
-  b.innerHTML = on ? "● Listening… — tap or Space to stop" : "🎤 Speak (Space)";
+  if(on){ b.innerHTML="● Listening… — tap or Space to stop"; return; }
+  b.innerHTML = (Engine.earDead || !Ear.usable()) ? "⏭ Next line (Space)" : "🎤 Speak (Space)";
 }
 
 function wireRehearse(){
   Engine.stopHard(); Engine.steps=[]; Engine.pos=0; Engine.curChunk=S.settings.rangeStart||0;
-  Engine.noEar=false; Engine.micMsg=""; Engine._micPrimed=false;   // fresh mic attempt each session
+  Engine.noEar=false; Engine.earDead=false; Engine.micMsg=""; Engine._micPrimed=false;   // fresh mic attempt each session
   const set=S.settings, total=S.cur.chunks.length;
   const rsV=$("rsV"), reV=$("reV");
   if(rsV)rsV.textContent=(set.rangeStart||0)+1;
