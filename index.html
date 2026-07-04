@@ -99,6 +99,9 @@
   .round{width:64px;height:64px;flex:0 0 64px;border-radius:18px;background:var(--panel2);border:1px solid var(--line);font-size:22px;display:flex;align-items:center;justify-content:center}
   .hint{width:100%;background:var(--panel2);border:1px solid var(--accent2);color:var(--accent);border-radius:16px;padding:18px;font-size:17px;font-weight:700;margin-bottom:14px}
   .hint:active{background:#2f2519}
+  .speak{width:100%;background:var(--accent);color:#1a1206;border:1px solid var(--accent);border-radius:16px;padding:18px;font-size:17px;font-weight:800;margin-bottom:12px}
+  .speak.listening{background:var(--good);color:#0f1e08;border-color:var(--good)}
+  .speak:active{transform:translateY(1px)}
   .ctlrow{display:flex;gap:10px;margin-bottom:8px}
   .ctlrow .btn{flex:1;padding:14px 8px;font-size:14px}
   .progress{height:6px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:6px 0 14px}
@@ -1018,7 +1021,7 @@ function viewRehearse(){
   const names=["Listen","Echo","Lead-in","Recall","Off book"];
   const lv=names.map((n,i)=>`<button class="lv ${set.level===i+1?"on":""}" data-lv="${i+1}">${i+1} · ${n}</button>`).join("");
   const ladder = coach
-    ? `<div class="lv on" style="width:100%;text-align:center">🎧 Coach — I give you each line, you say it back to move on</div>`
+    ? `<div class="lv on" style="width:100%;text-align:center">🎧 Coach — I give you each line · Space to speak · ⏭ to continue</div>`
     : `<div class="levels">${lv}</div>`;
   return `
     <div class="backbar">
@@ -1040,10 +1043,11 @@ function viewRehearse(){
     <div class="muted" id="counter" style="text-align:center;margin-bottom:14px">Chunk 0 / ${total}</div>
 
     <div class="transport">
-      <button class="round" id="back1" title="Previous">⏮</button>
+      <button class="round" id="back1" title="Previous (←)">⏮</button>
       <button class="bigplay" id="play">▶ Play</button>
-      <button class="round" id="fwd1" title="Next">⏭</button>
+      <button class="round" id="fwd1" title="Next (→)">⏭</button>
     </div>
+    ${coach?`<button class="speak" id="speakBtn">🎤 Speak (Space)</button>`:""}
     <button class="hint" id="hintBtn">💡 Hint — ${coach?"give me the line again":"say the lead-in"}</button>
     <div class="ctlrow">
       <button class="btn" id="repeat">↻ Repeat chunk</button>
@@ -1224,24 +1228,8 @@ const Engine={
 
   async play(){
     if(!this.steps.length) this.build();
-    if(coachOn() && !this.noEar && !this._micPrimed){ await this.primeMic(); updateMicStatus(); }
     this.running=true; setPlayUI(true); this.acquireWake();
     this.run();
-  },
-  // Ask for the mic up front so the browser shows a clear prompt and we learn
-  // immediately if it's blocked — rather than the recognizer flapping silently.
-  async primeMic(){
-    this._micPrimed=true;
-    if(!Ear.usable()){ this.noEar=true; this.micMsg="This page can’t listen — open it over https (or in Chrome), then press Play."; return; }
-    if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return;
-    try{
-      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-      try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
-      this.micMsg="";
-    }catch(e){
-      this.noEar=true;
-      this.micMsg="Microphone is blocked. Allow mic access for this page, then press Play.";
-    }
   },
   run(){
     if(!this.running) return;
@@ -1252,91 +1240,68 @@ const Engine={
     const self=this;
     const done=()=>{ if(!self.running)return; self.pos++; self.run(); };
     if(st.type==="speak"){ speakStep(st, done); }
-    else if(st.type==="listen"){ this.listenStep(st.ci, done); }
+    else if(st.type==="listen"){ this.waitStep(st.ci, done); }
     else{ this.timer=setTimeout(done, st.ms); }
   },
 
-  /* Interactive turn: mic open, aware of whether you're speaking, advancing
-     only once you've actually said the line. Never times out to the next line
-     on its own — if you go quiet without getting it, it hands the line back. */
-  listenStep(ci, done){
-    const self=this;
-    if(this.noEar || !Ear.usable()){ this.timedTurn(ci, done); return; }   // mic unavailable → timed turn
-    const c=S.cur.chunks[ci], expected=c.text, thr=matchThreshold(expected);
-    let committed="", curT="", heard="", started=false, lastGrow=Date.now(), finished=false, phase="listen";
-    let gotAny=false, armCount=0, startedAt=Date.now();
-    const H=()=>$("heard");
-    const setHeard=()=>{ heard=(committed+" "+curT).trim(); const h=H(); if(h) h.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : "🎤 listening…"; };
-    const prompt=()=>{ const p=$("phase"),cu=$("cur"); if(p)p.textContent="🎤 Your turn — say it"; if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`; const h=H(); if(h)h.textContent="🎤 listening…"; };
-    const succeed=()=>{
-      if(finished)return; finished=true; self.clearListen();
-      self.got[ci]=true;
-      const p=$("phase"),cu=$("cur"),h=H();
-      if(p)p.textContent="✓ Nice"; if(cu)cu.innerHTML=`<span class="silent" style="color:var(--good)">✓ got it</span>`; if(h)h.textContent="";
-      updateCounter();
-      self.timer=setTimeout(()=>{ if(self.running) done(); }, 600);
-    };
-    const fail=(msg)=>{                            // recognition can't run → explain + fall back to timed turns
-      if(finished)return; finished=true; self.clearListen();
-      self.noEar=true; self.micMsg=msg||"Couldn’t use the microphone."; updateMicStatus();
-      self.timedTurn(ci, done);
-    };
+  /* Manual turn: give the line, then WAIT — you drive it. Press Space (or the
+     Speak button) to turn the mic on and check yourself; ⏭ / → / Enter to move
+     on. Nothing auto-advances, and the mic stays off until you ask for it. */
+  waitStep(ci, done){
+    this.awaiting={ci, done};
+    this.listening=false; setSpeakUI(false);
+    const p=$("phase"), cu=$("cur"), h=$("heard");
+    if(p) p.textContent="🎤 Your turn";
+    if(cu) cu.innerHTML=`<span class="silent">• say your line •</span>`;
+    if(h) h.textContent = Ear.usable() ? "press Space to speak · ⏭ to continue" : "press ⏭ or → to continue";
+  },
+  // Space / Speak button — turn the mic on (or off). Off until you ask for it.
+  async speakToggle(){
+    if(!this.awaiting) return;
+    if(this.listening){ this.stopListen(); const h=$("heard"); if(h)h.textContent="press Space to speak · ⏭ to continue"; return; }
+    if(!Ear.usable()){ this.micMsg="This page can’t listen — open it over https in Chrome. Use ⏭ to continue."; updateMicStatus(); return; }
+    if(!this._micPrimed){                          // one clear permission prompt
+      this._micPrimed=true;
+      if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
+        try{ const s=await navigator.mediaDevices.getUserMedia({audio:true}); s.getTracks().forEach(t=>t.stop()); }
+        catch(e){ this.micMsg="Microphone is blocked. Allow mic access, or use ⏭ to continue."; updateMicStatus(); return; }
+      }
+    }
+    if(!this.awaiting) return;
+    this.startListen();
+  },
+  startListen(){
+    const self=this, ci=this.awaiting.ci, expected=S.cur.chunks[ci].text, thr=matchThreshold(expected);
+    this.listening=true; setSpeakUI(true); this.micMsg=""; updateMicStatus();
+    let committed="", curT="";
+    const h=$("heard"); if(h) h.textContent="🎤 listening…";
+    const show=()=>{ const heard=(committed+" "+curT).trim(); const e=$("heard"); if(e) e.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : "🎤 listening…"; };
+    const stopErr=(msg)=>{ self.micMsg=msg; updateMicStatus(); self.stopListen(); const e=$("heard"); if(e) e.textContent="press ⏭ to continue"; };
     const arm=()=>{
-      armCount++;
       Ear.start({
-        onresult:(t)=>{
-          if(finished)return;
-          gotAny=true; curT=t||""; if(curT){ started=true; lastGrow=Date.now(); }
-          setHeard();
-          if(seqMatch(expected,heard)>=thr) succeed();
-        },
+        onresult:(t)=>{ if(!self.listening)return; curT=t||""; const heard=(committed+" "+curT).trim(); show(); if(seqMatch(expected,heard)>=thr) self.gotAdvance(ci); },
         onerror:(err)=>{
-          if(finished)return;
-          if(err==="not-allowed"||err==="service-not-allowed") fail("Microphone is blocked. Allow mic access for this page, then press Play.");
-          else if(err==="audio-capture") fail("No microphone found — check your mic and try again.");
-          else if(err==="network") fail("Speech recognition needs an internet connection.");
-          // no-speech / aborted / other: benign — onend re-arms
+          if(!self.listening)return;
+          if(err==="not-allowed"||err==="service-not-allowed") stopErr("Mic blocked — allow it, or use ⏭ to continue.");
+          else if(err==="audio-capture") stopErr("No microphone found — use ⏭ to continue.");
+          else if(err==="network") stopErr("No internet for speech recognition — use ⏭ to continue.");
+          // no-speech / aborted: benign — onend re-arms
         },
-        onend:()=>{
-          if(finished||!self.running||phase!=="listen")return;
-          committed=(committed+" "+curT).trim(); curT="";
-          if(self._reArm)return;
-          self._reArm=setTimeout(()=>{ self._reArm=null; if(!finished&&self.running&&phase==="listen") arm(); }, 300);  // debounce → no mic-blink storm
-        }
+        onend:()=>{ if(!self.listening)return; committed=(committed+" "+curT).trim(); curT=""; if(self._reArm)return; self._reArm=setTimeout(()=>{ self._reArm=null; if(self.listening) arm(); },300); }
       });
     };
-    const represent=()=>{                          // hand the line back, then listen fresh
-      if(finished||!self.running)return;
-      phase="give"; Ear.stop(); if(self._reArm){ clearTimeout(self._reArm); self._reArm=null; }
-      committed=""; curT=""; heard=""; started=false;
-      const p=$("phase"),cu=$("cur"); if(p)p.textContent="Here it is — say it after me";
-      if(cu){ if(c.cue) cu.innerHTML=`<span class="whoTag">${esc(c.speaker||"cue")}</span>${esc(c.text)}`; else cu.textContent=c.text; }
-      speakLine(ci, ()=>{ if(finished||!self.running)return; phase="listen"; lastGrow=Date.now(); startedAt=Date.now(); gotAny=false; armCount=0; prompt(); arm(); });
-    };
-    // begin: mic open, watch speech activity
-    phase="listen"; prompt(); arm();
-    this.poll=setInterval(()=>{
-      if(finished||!self.running){ self.clearListen(); return; }
-      if(phase!=="listen") return;                 // don't nudge while re-giving the line
-      if(!gotAny && armCount>=4 && (Date.now()-startedAt)>5000){   // flapping with no transcript ⇒ mic not capturing
-        fail("Can’t hear the microphone. Check this page has mic permission and is opened over https."); return;
-      }
-      const idle=Date.now()-lastGrow;
-      if(!started){ if(idle>10000) represent(); }   // never started → give it again
-      else if(idle>2500) represent();               // stopped without getting it → give it again
-    }, 350);
+    arm();
   },
-  timedTurn(ci, done){
-    // No mic: show the line, give time to say it aloud, then move on.
-    const self=this, c=S.cur.chunks[ci];
-    const p=$("phase"),cu=$("cur"),h=$("heard");
-    if(p)p.textContent="🗣️ Your turn — say it";
-    if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`;
-    if(h)h.innerHTML = self.micMsg ? `<span style="color:var(--accent)">${esc(self.micMsg)}</span>` : "";
-    const ms=Math.max(2600, durMs(c.text, S.settings.pace));
-    this.timer=setTimeout(()=>{ if(self.running) done(); }, ms);
+  stopListen(){ this.listening=false; setSpeakUI(false); if(this._reArm){ clearTimeout(this._reArm); this._reArm=null; } try{ Ear.abort(); }catch(e){} },
+  gotAdvance(ci){                                  // recognized the line → mark + move on
+    this.got[ci]=true; updateCounter();
+    const p=$("phase"), cu=$("cur"), h=$("heard");
+    if(p)p.textContent="✓ Nice"; if(cu)cu.innerHTML=`<span class="silent" style="color:var(--good)">✓ got it</span>`; if(h)h.textContent="";
+    this.stopListen();
+    const d=this.awaiting?this.awaiting.done:null; this.awaiting=null;
+    this.timer=setTimeout(()=>{ if(this.running && d) d(); }, 500);
   },
-  clearListen(){ if(this.poll){ clearInterval(this.poll); this.poll=null; } if(this._reArm){ clearTimeout(this._reArm); this._reArm=null; } try{ Ear.abort(); }catch(e){} },
+  clearListen(){ this.awaiting=null; this.listening=false; if(this.poll){ clearInterval(this.poll); this.poll=null; } if(this._reArm){ clearTimeout(this._reArm); this._reArm=null; } try{ Ear.abort(); }catch(e){} setSpeakUI(false); },
 
   pause(){
     this.running=false; setPlayUI(false);
@@ -1427,6 +1392,11 @@ function setPlayUI(on){
   p.classList.toggle("playing",on);
   p.innerHTML = on ? "⏸ Pause" : "▶ Play";
 }
+function setSpeakUI(on){
+  const b=$("speakBtn"); if(!b)return;
+  b.classList.toggle("listening",on);
+  b.innerHTML = on ? "● Listening… — tap or Space to stop" : "🎤 Speak (Space)";
+}
 
 function wireRehearse(){
   Engine.stopHard(); Engine.steps=[]; Engine.pos=0; Engine.curChunk=S.settings.rangeStart||0;
@@ -1449,12 +1419,25 @@ function wireRehearse(){
   }));
   on("coach","change",e=>{ set.listen=e.target.checked; saveSettings(); render(); });
   on("play","click",()=>Engine.toggle());
+  on("speakBtn","click",()=>Engine.speakToggle());
   on("hintBtn","click",()=>Engine.hint());
   on("repeat","click",()=>Engine.repeat());
   on("restart","click",()=>Engine.restart());
   on("back1","click",()=>Engine.prev());
   on("fwd1","click",()=>Engine.next());
   on("back","click",()=>{ Engine.stopHard(); S.view="library"; render(); });
+
+  // keyboard: Space = speak (or play/pause) · → / Enter = next · ← = previous
+  if(Engine._keyHandler) document.removeEventListener("keydown", Engine._keyHandler);
+  Engine._keyHandler=(e)=>{
+    if(S.view!=="rehearse") return;
+    const tag=(e.target&&e.target.tagName)||"";
+    if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT") return;
+    if(e.code==="Space"){ e.preventDefault(); if(Engine.awaiting) Engine.speakToggle(); else Engine.toggle(); }
+    else if(e.code==="ArrowRight"||e.code==="Enter"){ e.preventDefault(); Engine.next(); }
+    else if(e.code==="ArrowLeft"){ e.preventDefault(); Engine.prev(); }
+  };
+  document.addEventListener("keydown", Engine._keyHandler);
   on("edit","click",()=>{ Engine.stopHard(); S.draft=S.cur.rawText||S.cur.chunks.map(c=>(c.cue?c.speaker+": ":"")+c.text).join("\n"); S.view="edit"; render(); });
 
   on("pace","input",e=>{ set.pace=+e.target.value; $("paceV").textContent=set.pace.toFixed(1)+"×"; });
