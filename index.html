@@ -356,19 +356,61 @@ function splitSentences(text){
   const parts=joined.match(/[^.!?;]+[.!?;]+["')\]]?|\S[^.!?;]*$/g);
   return parts?parts.map(p=>p.trim()).filter(Boolean):[joined];
 }
+/* Strip things that shouldn't be spoken: [stage directions], markdown emphasis. */
+function cleanSpoken(s){
+  return (s||"").replace(/\[[^\]]*\]/g," ").replace(/[*_`>#]+/g," ").replace(/\s+/g," ").trim();
+}
+/* A line that is only a character name (a screenplay cue label), e.g. FRIEDRICH,
+   MONK, "FRIEDRICH (as Fyodor)" — not spoken; it just sets who speaks next. */
+function speakerLabel(line){
+  const m=(line||"").trim().match(/^([A-Z][A-Z0-9'’.\- ]*?)\s*(?:\(([^)]*)\))?$/);
+  if(!m) return null;
+  const name=m[1].trim();
+  if(name.length<2 || /[a-z]/.test(name)) return null;          // must be ALL-CAPS
+  const as=m[2] ? m[2].replace(/^as\s+/i,"").trim() : "";
+  return { name, as, who: as||name };
+}
 function parseChunks(raw){
+  raw=(raw||"").replace(/\r/g,"");
+  const lines=raw.split("\n");
+  // "Scripty" input (markdown headers / rules / ≥2 speaker labels) gets the
+  // screenplay treatment; plain monologues are parsed the simple old way so a
+  // stray ALL-CAPS line is never mistaken for a label.
+  const hasHead=lines.some(l=>/^\s*#{1,6}\s|^\s*#{1,6}\s*$/.test(l));
+  const hasRule=lines.some(l=>/^\s*(-{3,}|—{2,}|\*{3,}|_{3,})\s*$/.test(l.trim()));
+  let labelCount=0; for(const l of lines){ if(speakerLabel(l.trim())) labelCount++; }
+  const scripty = hasHead || hasRule || labelCount>=2;
+
+  let primary=null;
+  if(scripty){ for(const l of lines){ const sp=speakerLabel(l.trim()); if(sp){ primary=sp.name; break; } } }
+
   const out=[];
-  const blocks=raw.replace(/\r/g,"").split(/\n\s*\n/);
-  blocks.forEach(block=>{
-    const t=block.trim(); if(!t) return;
-    const sentences=splitSentences(t);
-    sentences.forEach((s,i)=>{
-      const c={id:uid(),text:s.trim(),cue:false,speaker:null,beat:i===0};
-      const m=c.text.match(/^([A-Z][A-Z0-9 .'’\-]{1,24}):\s*(.+)$/);
-      if(m){ c.speaker=m[1].trim(); c.text=m[2].trim(); c.cue=true; }
-      if(c.text) out.push(c);
+  let curSpk=null, buf=[], beatPending=true;
+  const isYou=sp=> !sp || (sp.name===primary && !sp.as);
+  function flush(){
+    const text=buf.join("\n").trim(); buf=[];
+    if(!text) return;
+    const you=isYou(curSpk);
+    splitSentences(text).forEach((s,i)=>{
+      const t=cleanSpoken(s); if(!t) return;
+      out.push({id:uid(),text:t,cue:!you,speaker:you?null:(curSpk?curSpk.who:null),beat:beatPending&&i===0});
+      beatPending=false;
     });
-  });
+  }
+  for(const line of lines){
+    const t=line.trim();
+    if(/^#{1,6}(\s|$)/.test(t)){ flush(); beatPending=true; continue; }          // markdown header
+    if(/^(-{3,}|—{2,}|\*{3,}|_{3,})$/.test(t)){ flush(); beatPending=true; continue; } // rule
+    if(t===""){ flush(); beatPending=true; continue; }                            // blank → beat
+    if(scripty){
+      const sp=speakerLabel(t);
+      if(sp){ flush(); curSpk=sp; continue; }                                     // label line (silent)
+    }
+    const m=t.match(/^([A-Z][A-Z0-9 .'’\-]{1,24}):\s*(.+)$/);                     // inline "NAME: text" cue
+    if(m){ flush(); const ct=cleanSpoken(m[2]); if(ct){ out.push({id:uid(),text:ct,cue:true,speaker:m[1].trim(),beat:beatPending}); beatPending=false; } continue; }
+    buf.push(t);
+  }
+  flush();
   return out;
 }
 function words(t){return t.trim().split(/\s+/).filter(Boolean);}
@@ -417,6 +459,75 @@ function recSourceLabel(){
   return "🎙 Recording attached — align lines in Edit";
 }
 
+/* ---------- automatic alignment ----------
+   Decode the uploaded recording, find the pauses between lines, and place each
+   line at a pause — biased toward where the line is *expected* (by its length)
+   so boundaries land right even when pauses are uneven. Fully offline: no mic,
+   no network. Manual tap-align stays available to fine-tune. */
+function decodeAudio(blob){
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if(!OAC) return Promise.resolve(null);
+  return blob.arrayBuffer().then(buf=>{
+    let ctx; try{ ctx=new OAC(1,1,44100); }catch(e){ return null; }
+    return new Promise(res=>{
+      let p; try{ p=ctx.decodeAudioData(buf, d=>res(d), ()=>res(null)); }catch(e){ res(null); return; }
+      if(p&&p.then) p.then(d=>res(d),()=>res(null));
+    });
+  }).catch(()=>null);
+}
+function autoMarks(ab, chunks){
+  const sr=ab.sampleRate, dur=ab.duration, N=chunks.length;
+  let data=ab.getChannelData(0);
+  if(ab.numberOfChannels>1){ const c1=ab.getChannelData(1); const m=new Float32Array(data.length); for(let i=0;i<data.length;i++)m[i]=(data[i]+c1[i])*0.5; data=m; }
+  const frame=Math.max(1,Math.floor(sr*0.02)), nF=Math.floor(data.length/frame), fps=sr/frame;
+  const energy=new Float32Array(nF);
+  for(let f=0;f<nF;f++){ let s=0; const off=f*frame; for(let i=0;i<frame;i++){ const v=data[off+i]; s+=v*v; } energy[f]=Math.sqrt(s/frame); }
+  const sorted=Float32Array.from(energy).sort();
+  const floor=sorted[Math.floor(nF*0.1)]||0, peak=sorted[Math.floor(nF*0.95)]||0.01;
+  const thr=Math.max(floor*3, floor+(peak-floor)*0.06, 1e-4);
+  const minSil=Math.max(1,Math.round(0.18*fps));           // 180ms of quiet = a pause
+  const onsets=[]; let sil=0, inSpeech=false, first=-1;
+  for(let f=0;f<nF;f++){
+    if(energy[f]>thr){
+      if(!inSpeech){ const t=f/fps; if(first<0)first=t; if(sil>=minSil)onsets.push(t); inSpeech=true; }
+      sil=0;
+    }else{ sil++; inSpeech=false; }
+  }
+  const start=first>0?first:0;
+  const lens=chunks.map(c=>Math.max(1,(c.text||"").length)); const tot=lens.reduce((a,b)=>a+b,0);
+  const expected=[]; let cum=0; for(let i=0;i<N;i++){ expected.push(start+(cum/tot)*(dur-start)); cum+=lens[i]; }
+  const marks=new Array(N).fill(null);
+  marks[0]= start>0.15 ? +Math.max(0,start-0.1).toFixed(3) : 0;
+  const win=dur/Math.max(1,N);
+  let oi=0, prev=marks[0];
+  for(let i=1;i<N;i++){
+    const target=expected[i]; let best=-1, bd=Infinity;
+    for(let k=oi;k<onsets.length;k++){ const ot=onsets[k]; if(ot<=prev+0.05)continue; const d=Math.abs(ot-target); if(d<bd){bd=d;best=k;} if(ot>target+win)break; }
+    let t;
+    if(best>=0 && bd<win*0.9){ t=onsets[best]; oi=best+1; } else { t=Math.max(prev+0.15,target); }
+    marks[i]=+t.toFixed(3); prev=t;
+  }
+  for(let i=1;i<N;i++){ if(marks[i]<=marks[i-1]) marks[i]=+(marks[i-1]+0.15).toFixed(3); }
+  return {marks, pauses:onsets.length};
+}
+async function autoAlign(s){
+  if(!Blobs.ok()) return {ok:false};
+  const blob=await Blobs.get(s.id); if(!blob) return {ok:false};
+  const ab=await decodeAudio(blob); if(!ab) return {ok:false};
+  const {marks,pauses}=autoMarks(ab, s.chunks);
+  s.marks=marks; s.autoAligned=true;
+  await saveScript(s);
+  return {ok:true, pauses};
+}
+async function runAutoAlign(s,{silentFail=false}={}){
+  S._aligning=true; render();
+  let res={ok:false};
+  try{ res=await autoAlign(s); }catch(e){}
+  S._aligning=false; render();
+  if(!res.ok && !silentFail) alert("Couldn’t auto-align this file — the browser may not be able to decode this audio format. You can still align by tapping through it.");
+  return res;
+}
+
 /* ---------- app state ---------- */
 const S={
   view:"library",
@@ -426,7 +537,203 @@ const S={
   settings:{ level:2, pace:1, loop:true, youVoice:"", cueVoice:"", rangeStart:0, rangeEnd:-1, listen:true }
 };
 
+/* ---------- built-in piece ----------
+   Seeded once on first run. The ## headers and character labels below are
+   parsed as structure (beats / cue speakers) and are never spoken aloud, so
+   it won't read "Chunk one" or "Friedrich". Fyodor and Monk become cues. */
+const SEED_TITLE="The Things of Friends";
+const SEED_TEXT=`## Chunk 1 — The Weekly Appointment
+
+FRIEDRICH
+
+Each week I sit here and drink tea across from Fyodor Mikhailovich Dostoevsky, the Russian novelist. He died some nineteen years before me, and I feel it is the effect of some strange trickster god that places him across from me at a standing weekly appointment. Because in life — and this is a true story — I received in the post a copy of Notes from Underground by accident. I hadn't ordered it; it was delivered by mistake. And in its French translation, I read it, and I said to a colleague that Dostoevsky alone is the psychologist from whom I have something to learn. Well — now, one hundred twenty-six years after my death, I sit across from him on a weekly basis, and he asks me questions about what I think and how I feel.
+
+## Chunk 2 — The Question
+
+FRIEDRICH
+
+He always starts with the same question. He asks me, "Professor Nietzsche, do you think we are in hell?" And I ponder, and I twist my wonderful mustache, and I think on it. I think on why he is asking, and I do not believe it is because — despite the fact that he never rid himself of his insufferable Russian Orthodoxy — he imagines there nothing to be gained by asking such a question again and again. I respond in various ways.
+
+One thing I tell him quite often is: yes, I am in hell. I am in a room that looks like the end of 2001: A Space Odyssey, and there is an unspeaking jazz player who has a habit of playing Strauss's Zarathustra to annoy me.
+
+## Chunk 3 — Not Hell, Because Learning
+
+FRIEDRICH
+
+But of late I have come to another conclusion. I do not think we are in hell — because if there is one thing not possible in hell, it is learning. And much has been learned by both Fyodor Mikhailovich Dostoevsky and, I dare say, myself. Mr. Monk seems to be picking up a thing or two as well, here in the afterlife.
+
+One thing I have been learning about is American television. And I've come to the deep conviction that it is not a good idea for one man to write every episode of a television series — much less an entire universe of spin-offs. Speaking, of course, of Yellowstone. Fyodor Dostoevsky refuses to watch Yellowstone. But he has a theory as to why I like it — one I do not care for. He says to me, "Professor Nietzsche, it seems that Kevin Costner has dipped his quill in your prophetic dream of the creature beyond human it, your Übermensch."
+
+## Chunk 4 — Dionysiac and Apollonian
+
+FRIEDRICH
+
+Kevin Costner, the American frontier. There is something unavoidably Dionysiac about these people being, at their worst, the most themselves — these Americans whose every ambition is constantly to be at work being themselves. I really cannot parse, in these people, in this country I never visited, the tension between the Dionysiac and the Apollonian.
+
+Mr. Monk, for example, who is out-of-his-gourd precisely as one would hope for an American jazz player. And yet there is a devotion to the Apollonian structure of the cosmos undergirding all of the notes he doesn't play — and whatnot.
+
+## Chunk 5 — Americans! / Yarvin / The Exchange
+
+FRIEDRICH
+
+Americans! I am not so unobservant of the anti-democratic immorality unleashing itself upon that continent and wreaking havoc on the world. Oh, Americans. Fyodor Mikhailovich Dostoevsky asked me about a particular one last week. He's got under my skin, he is not the first fascist to mold himself in my image. His name is Curtis Yarvin. Curtis Yarvin, whose pen name is even more dyspeptic on the tongue: Mencius Moldbug. Mencius Moldbug, the alt-right Substack philosopher systematically dismantling the illusion of the American utopia. The political demiurge behind Elon Musk and Peter Thiel. Curtis Yarvin, Mencius Moldbug, an inspiration for Elon Musk and Peter Thiel. These are the names of the sociopathic right-wing extremists dismantling democracies across the globe to unleash their AI-powered dystopia upon humanity simply to conceal their spiritual and urinary incontinence — Elon Musk, Peter Thiel, Curtis Yarvin, Mencius Moldbug. These names sound less like world historical villains and more like things you spray on turnips to keep away the pigs.
+
+FRIEDRICH (as Fyodor)
+
+He bothers you, Friedrich? This Curtis Yarvin?
+
+FRIEDRICH
+
+"He bothers you, Friedrich?" In life I said that "Dostoevsky alone I would submit to be my psychologist," but I did not mean it literally.
+
+FRIEDRICH (as Fyodor)
+
+We never met in life. I died long before your prolific era, your period of earth-shaking profundity.
+
+FRIEDRICH
+
+And my subsequent collapse into insanity.
+
+FRIEDRICH (as Fyodor)
+
+Who in this place who has sought to look upon the face of God has not developed the divine madness?
+
+## Chunk 6 — I Was Broken!
+
+FRIEDRICH
+
+I was broken! I was an invalid! A child, regressed, unspeaking, the ward of his mother. Eleven years without my tongue, Fyodor, the one thing I had to defend myself. And in my muteness, she…
+
+I, yes, I...
+I cursed the anti-Semites in my day.
+In life I cursed the noble lie, the myth
+of men who drape themselves in flags
+of race because they've not the gall
+to earn a place of greatness on their own,
+and yet she, she, bequeathed my legacy
+into the flames of genocidal industry
+and I... she…
+
+## Chunk 7 — Turin
+
+FRIEDRICH
+
+And this is where I am. I am not in hell, but I am defending my legacy. And I will and I must, for something happened before my death and after my sanity that I cannot access in my mind's eye. And yet I return and return and return to that day in Turin…
+
+Here is the thing about me, I went insane. The lore has it that on January 3, 1889, after writing the words of a madman, claiming I was Dionysus, Jesus Christ, and condemning the anti-Semites of my era to execution, I walked the streets of Turin without a coat to meet the weather and I saw a cabman beating his horse.
+
+The myth they tell of me is that I rushed to the horse and flung myself around its neck and I wept. Dionysus 11:35: "Nietzsche wept."
+
+This is not my memory. But it's not right to say I have memory of that day or the next eleven years of my life. My father died when I was five years old of brain softening, as cruel and undiagnostic a diagnosis in my day as it is now. I did not die of syphilis, despite the rumours, and you flatter my profligacy when you claim I did.
+
+But I must, I must, I must explain what became of my legacy, my words, for that was all I had, it… the time is lost to me, what happened…
+
+## Chunk 8 — The Poem
+
+FRIEDRICH
+
+Twas lightning wrote my work when I was 'sane,'
+A madness prophets know yet dare not name,
+It seared away illusion's flesh, unbound
+Profundities unmoored my mind from ground,
+And there!
+I saw the moment blush as she was seen,
+The ever-present origin gave birth
+And I, the midwife and abortionist.
+Old Oedipus, our Sigmund's mama's boy,
+Has no monopoly on divine sin.
+You killed your dad? Oh my, tut tut, repent.
+I stand in death accused of killing God,
+And being muse to genocide at scale.
+But I was far more wicked than they say,
+I did not slay their Jewish king of kings,
+Dethrone the Sermon on the Mount as law,
+Installing ego as the sum of good.
+I killed illusion, the fiction of us
+As noble warriors for peace, the last
+Defense against the fall of neo-Rome.
+The liberals betray once more the lamb
+To make a truce that Caesar never keeps.
+The eternal recurrence of the same
+Insurgence: the wholesale slaughter of the
+Disenfranchised martyrs. For what? For coin?
+For AI? For moats being dug by labor
+Uncompensated for their labor, oh
+how a ditch around a castle tends to fill
+With corpses. The liberals in Germany,
+The hypocrites with slave morality,
+Gave way and way and way to evil's plans
+And clutched in shock when I unearthed the truth:
+That God is dead because they've killed their souls,
+The liberal Pharisees can only see
+The ROI of this next deal they'll make,
+Appeasing Hitler was the rational move,
+And priestly powerpoints confirm that selfish
+Reason is the god we all must serve.
+
+## Chunk 9 — Fuck That Noise / The Owl
+
+FRIEDRICH
+
+Monk, you faithless heathen, what do you say to that noise?
+
+MONK
+
+Fuck that noise.
+
+FRIEDRICH
+
+For the ones in the back who didn't hear it. Must we dance to the buzzing of the flies of the marketplace?
+
+MONK
+
+Fuck that. Fuck it right in the ass.
+
+FRIEDRICH
+
+I am not in hell, because I am still learning. And I have learned something in the afterlife.
+
+MONK
+
+Lay it down, Brother Nietzsche.
+
+FRIEDRICH
+
+What the Nazis could not see, what Ayn Rand could not see, what Curtis Yarvin and the Christofascists cannot see: the Übermensch, it is still nigh. What they could not see, what they will not see, is that the Übermensch is plural. It is us all. It is the unshackled collective intelligence unleashed. It is the unfolding of the god consciousness that crushed me when it fell upon me in Turin. It is the same that crushed you and left you barren of music in your last years.
+
+MONK
+
+That's my story to tell! But I'm picking up what you're putting down.
+
+FRIEDRICH
+
+I played so many chords, I rang so many bells I could not unring.
+
+MONK
+
+That's cuz you human, Freddy. All too human.
+
+FRIEDRICH
+
+I was silent for the last eleven years of life, but I will not be silent in my death.
+
+The Owl takes flight, the grey upon the grey,
+The night it conquers ground away from day,
+But Janus faced the self-same whole and part,
+Eternal God alive in every heart.`;
+
+async function maybeSeed(){
+  const seeded=await Store.get("lr:seeded");
+  if(seeded) return;
+  await Store.set("lr:seeded",1);
+  const chunks=parseChunks(SEED_TEXT);
+  if(!chunks.length) return;
+  const s={id:uid(),title:SEED_TITLE,chunks,rawText:SEED_TEXT,marks:new Array(chunks.length).fill(null)};
+  await saveScript(s);
+}
+
 async function boot(){
+  await maybeSeed();
   const idx=await Store.get("lr:index"); S.index=idx||[];
   const st=await Store.get("lr:settings"); if(st) S.settings=Object.assign(S.settings,st);
   render();
@@ -501,6 +808,7 @@ async function attachAudio(blob,name){
   s.marks=new Array(s.chunks.length).fill(null);
   await saveScript(s);
   render();
+  await runAutoAlign(s, {silentFail:true});   // try to line it up automatically on attach
 }
 
 /* =========================================================
@@ -550,23 +858,29 @@ function audioCardHTML(chunkCount){
   }
   const s=S.cur, has=!!(s&&s.audioName);
   let body;
-  if(has){
+  if(S._aligning){
+    body=`<div class="muted">⏳ Analyzing the recording and lining up your lines…</div>`;
+  }else if(has){
     const need=s.chunks.length, have=marksCount(s), done=have>=need&&need>0;
+    const status = done ? (s.autoAligned?"auto-aligned ✓":"all lines aligned ✓") : ("aligned "+have+" / "+need);
     body=`
       <div class="scriptItem" style="border:none;padding:2px 0">
         <div>
           <div class="t">🎙 ${esc(s.audioName)}</div>
-          <div class="m">${fmt(s.audioDur)} · ${done?"all lines aligned ✓":("aligned "+have+" / "+need)}</div>
+          <div class="m">${fmt(s.audioDur)} · ${status}</div>
         </div>
       </div>
       <div class="row" style="margin-top:10px">
-        <button class="btn primary small" id="btnAlign">🎯 Align lines</button>
+        <button class="btn primary small" id="btnAutoAlign">✨ Auto-align</button>
+        <button class="btn small" id="btnAlign">🎯 Fine-tune</button>
+      </div>
+      <div class="row" style="margin-top:8px">
         <button class="btn small ghost" id="btnReplace">Replace</button>
         <button class="btn small danger" id="btnRemoveAudio" style="flex:0 0 auto">Remove</button>
       </div>
       <div class="faint" style="margin-top:8px">${done
-        ? "Rehearsal will play your recording for every line."
-        : "Tap <b style=\"color:var(--ink)\">Align lines</b> and play through once to map each line to the audio. Lines you don’t align use the robot voice."}</div>`;
+        ? "Rehearsal plays your recording for every line. <b style=\"color:var(--ink)\">Auto-align</b> re-detects boundaries from the pauses; <b style=\"color:var(--ink)\">Fine-tune</b> lets you tap through to nudge them."
+        : "<b style=\"color:var(--ink)\">Auto-align</b> lines them up from the recording’s pauses; <b style=\"color:var(--ink)\">Fine-tune</b> lets you tap through by hand. Unaligned lines use the robot voice."}</div>`;
   }else{
     body=`
       <div class="row">
@@ -803,6 +1117,10 @@ function wireEdit(){
     delete S.cur.audioName; delete S.cur.audioDur; S.cur.marks=new Array(S.cur.chunks.length).fill(null);
     Rec.unload();
     await saveScript(S.cur); render();
+  });
+  on("btnAutoAlign","click",async()=>{
+    const s=await persistEditor(); if(!s)return;
+    await runAutoAlign(s);
   });
   on("btnAlign","click",async()=>{
     const s=await persistEditor(); if(!s)return;
@@ -1094,7 +1412,7 @@ function wireAlign(){
   on("aclear","click",()=>{ Align.marks=new Array(total).fill(null); Align.marks[0]=0; Align.idx=1; render(); });
   on("aseek","input",e=>{ const d=(s.audioDur||Rec.duration()||0); e.target._drag=true; Rec.seek(d*(+e.target.value/1000)); const at=$("atime"); if(at)at.textContent=fmt(Rec.time())+" / "+fmt(d); });
   on("aseek","change",e=>{ e.target._drag=false; });
-  on("adone","click",async()=>{ stopAlignTick(); Rec.pauseEl(); s.marks=Align.marks.slice(); await saveScript(s); S.view="edit"; render(); });
+  on("adone","click",async()=>{ stopAlignTick(); Rec.pauseEl(); s.marks=Align.marks.slice(); s.autoAligned=false; await saveScript(s); S.view="edit"; render(); });
   on("aback","click",()=>{ stopAlignTick(); Rec.pauseEl(); S.view="edit"; render(); });
 }
 
