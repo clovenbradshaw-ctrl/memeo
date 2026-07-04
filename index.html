@@ -87,6 +87,7 @@
   .stage .cur.cue{color:var(--accent)}
   .stage .cur .whoTag{display:block;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
   .stage .nxt{margin-top:16px;font-size:15px;color:var(--faint);line-height:1.4}
+  .stage .heard{margin-top:12px;min-height:20px;font-size:15px;color:var(--good);font-style:italic;line-height:1.35}
   .stage .phase{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin-bottom:14px}
   .stage .silent{color:var(--accent);font-weight:600;letter-spacing:.02em}
   .transport{display:flex;gap:12px;align-items:center;margin-bottom:12px}
@@ -198,6 +199,151 @@ const Store={
   }
 };
 
+/* ---------- audio blob store (IndexedDB) ----------
+   Recordings are far too big for localStorage, so the audio Blob for each
+   piece lives in IndexedDB keyed by the script id. Timestamps that line the
+   recording up with the text are small and ride along in the script record. */
+const Blobs=(function(){
+  const DBN="lr-audio", STORE="audio"; let dbp=null;
+  function open(){
+    if(dbp) return dbp;
+    dbp=new Promise((res,rej)=>{
+      let req; try{ req=indexedDB.open(DBN,1); }catch(e){ rej(e); return; }
+      req.onupgradeneeded=()=>{ try{ if(!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE); }catch(e){} };
+      req.onsuccess=()=>res(req.result);
+      req.onerror=()=>rej(req.error);
+    });
+    return dbp;
+  }
+  function store(mode){ return open().then(db=>db.transaction(STORE,mode).objectStore(STORE)); }
+  return {
+    ok(){ try{ return typeof indexedDB!=="undefined" && !!indexedDB; }catch(e){ return false; } },
+    async put(id,blob){ const st=await store("readwrite"); return new Promise((res,rej)=>{ const r=st.put(blob,id); r.onsuccess=()=>res(true); r.onerror=()=>rej(r.error); }); },
+    async get(id){ try{ const st=await store("readonly"); return await new Promise(res=>{ const r=st.get(id); r.onsuccess=()=>res(r.result||null); r.onerror=()=>res(null); }); }catch(e){ return null; } },
+    async del(id){ try{ const st=await store("readwrite"); return await new Promise(res=>{ const r=st.delete(id); r.onsuccess=()=>res(true); r.onerror=()=>res(false); }); }catch(e){ return false; } }
+  };
+})();
+
+/* ---------- in-app recorder (optional) ----------
+   Lets the user record straight into the piece. Feature-detected; the button
+   is hidden where MediaRecorder / getUserMedia are unavailable. */
+const Recorder={
+  mr:null, parts:[], stream:null,
+  supported(){ return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); },
+  async start(){
+    this.stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    this.parts=[];
+    const opts={};
+    try{
+      const mt=["audio/webm","audio/mp4","audio/ogg"].find(t=>window.MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(t));
+      if(mt) opts.mimeType=mt;
+    }catch(e){}
+    this.mr=new MediaRecorder(this.stream,opts);
+    this.mr.ondataavailable=e=>{ if(e.data&&e.data.size) this.parts.push(e.data); };
+    this.mr.start();
+  },
+  stop(){
+    return new Promise(res=>{
+      if(!this.mr){ res(null); return; }
+      const type=this.mr.mimeType||"audio/webm";
+      this.mr.onstop=()=>{
+        const blob=new Blob(this.parts,{type});
+        try{ this.stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+        this.mr=null; this.stream=null; this.parts=[];
+        res(blob);
+      };
+      try{ this.mr.stop(); }catch(e){ res(null); }
+    });
+  }
+};
+
+/* ---------- recorded-audio player ----------
+   Plays a bounded segment [start,end) of the attached recording, and drives
+   free playback for the alignment screen. Kept at natural speed (pace only
+   affects the silent gaps, same as the TTS path).  */
+const Rec={
+  el:null, url:null, endTimer:null, onend:null,
+  ensure(){ if(!this.el){ try{ this.el=new Audio(); this.el.preload="auto"; }catch(e){ this.el=null; } } return this.el; },
+  load(url){
+    this.cancel();
+    if(this.url && this.url!==url){ try{ URL.revokeObjectURL(this.url); }catch(e){} }
+    this.url=url;
+    const el=this.ensure(); if(el&&url){ el.src=url; try{ el.load(); }catch(e){} }
+  },
+  unload(){
+    this.cancel();
+    if(this.url){ try{ URL.revokeObjectURL(this.url); }catch(e){} this.url=null; }
+    if(this.el){ try{ this.el.removeAttribute("src"); this.el.load(); }catch(e){} }
+  },
+  ready(){ return !!(this.el && this.url); },
+  duration(){ return this.el && isFinite(this.el.duration) ? this.el.duration : 0; },
+  clearTimer(){ if(this.endTimer){ clearTimeout(this.endTimer); this.endTimer=null; } },
+  playSegment(start,end,{onend}={}){
+    const el=this.ensure();
+    if(!el||!this.url){ if(onend)onend(); return; }
+    this.cancel(); this.onend=onend||null;
+    const s2=Math.max(0,start||0), dur=Math.max(0.05,(end-s2));
+    const finish=()=>{ this.clearTimer(); el.removeEventListener("timeupdate",onTime); try{el.pause();}catch(e){} const cb=this.onend; this.onend=null; if(cb)cb(); };
+    const onTime=()=>{ if(el.currentTime>=end-0.03) finish(); };
+    const begin=()=>{
+      try{
+        el.playbackRate=1; el.currentTime=s2;
+        el.addEventListener("timeupdate",onTime);
+        this.endTimer=setTimeout(finish, Math.ceil(dur*1000)+140);
+        const p=el.play(); if(p&&p.catch)p.catch(()=>finish());
+      }catch(e){ finish(); }
+    };
+    if(el.readyState>=1) begin();
+    else { const onMeta=()=>{ el.removeEventListener("loadedmetadata",onMeta); begin(); }; el.addEventListener("loadedmetadata",onMeta); try{ el.load(); }catch(e){} }
+  },
+  /* free playback controls used by the alignment screen */
+  play(){ const el=this.ensure(); if(el&&this.url){ this.clearTimer(); try{ el.playbackRate=1; const p=el.play(); if(p&&p.catch)p.catch(()=>{}); }catch(e){} } },
+  pauseEl(){ if(this.el){ try{ this.el.pause(); }catch(e){} } },
+  seek(t){ if(this.el){ try{ this.el.currentTime=Math.max(0,t||0); }catch(e){} } },
+  time(){ return this.el ? (this.el.currentTime||0) : 0; },
+  playing(){ return !!(this.el && !this.el.paused && !this.el.ended); },
+  cancel(){ this.clearTimer(); this.onend=null; if(this.el){ try{ this.el.pause(); }catch(e){} } }
+};
+/* ---------- speech listener (Web Speech recognition) ----------
+   During the user's turn it transcribes what they say and matches it against
+   the expected line, so rehearsal advances when they actually nail the line
+   instead of just waiting out a timer. Feature-detected; degrades to the old
+   timed pause where recognition isn't available. */
+const Ear=(function(){
+  const SR = (typeof window!=="undefined") && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  let rec=null, on=false;
+  function collect(e){ let t=""; for(let i=0;i<e.results.length;i++){ t+=e.results[i][0].transcript+" "; } return t.trim(); }
+  return {
+    supported(){ return !!SR; },
+    start({onresult,onend}={}){
+      if(!SR) return false;
+      try{
+        rec=new SR();
+        rec.lang="en-US"; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=1;
+        rec.onresult=e=>{ if(onresult) onresult(collect(e)); };
+        rec.onerror=()=>{};
+        rec.onend=()=>{ on=false; if(onend) onend(); };
+        rec.start(); on=true; return true;
+      }catch(e){ on=false; return false; }
+    },
+    stop(){ if(rec){ try{ rec.stop(); }catch(e){} } on=false; },
+    abort(){ if(rec){ try{ rec.abort(); }catch(e){} rec=null; } on=false; }
+  };
+})();
+/* Fraction of the expected words matched, in order (longest common subsequence
+   over words) — tolerant of stumbles and filler, strict about order. */
+function normWords(t){ return (t||"").toLowerCase().replace(/[^a-z0-9'\s]/g," ").replace(/\s+/g," ").trim().split(" ").filter(Boolean); }
+function seqMatch(expected,heard){
+  const E=normWords(expected), H=normWords(heard);
+  if(!E.length||!H.length) return 0;
+  const n=H.length; let dp=new Array(n+1).fill(0);
+  for(let i=1;i<=E.length;i++){ let prev=0; for(let j=1;j<=n;j++){ const tmp=dp[j]; dp[j]= E[i-1]===H[j-1] ? prev+1 : Math.max(dp[j],dp[j-1]); prev=tmp; } }
+  return dp[n]/E.length;
+}
+function matchThreshold(expected){ return normWords(expected).length<=3 ? 0.95 : 0.6; }
+
+function silence(){ try{ TTS.cancel(); }catch(e){} try{ Rec.cancel(); }catch(e){} try{ Ear.abort(); }catch(e){} }
+
 /* ---------- helpers ---------- */
 const uid=()=>Math.random().toString(36).slice(2,9);
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
@@ -228,6 +374,48 @@ function parseChunks(raw){
 function words(t){return t.trim().split(/\s+/).filter(Boolean);}
 function leadIn(t){const w=words(t);return w.length<=4?t:w.slice(0,3).join(" ")+" …";}
 function durMs(t,pace){const n=words(t).length;return Math.max(1500,(n*380+700))*pace;}
+function fmt(sec){ sec=Math.max(0,Math.round(sec||0)); const m=Math.floor(sec/60),s=sec%60; return m+":"+(s<10?"0":"")+s; }
+
+/* ---------- recording <-> text alignment ---------- */
+function marksCount(s){ if(!s||!Array.isArray(s.marks))return 0; let n=0; for(let i=0;i<s.chunks.length;i++){ if(s.marks[i]!=null)n++; } return n; }
+function fitMarks(s){                                   // keep marks[] the same length as chunks[]
+  const n=s.chunks.length;
+  if(!Array.isArray(s.marks)){ s.marks=new Array(n).fill(null); return; }
+  if(s.marks.length!==n){ const m=new Array(n).fill(null); for(let i=0;i<Math.min(n,s.marks.length);i++)m[i]=s.marks[i]; s.marks=m; }
+}
+function audioSeg(ci){                                  // {start,end} of chunk ci in the recording, or null
+  const s=S.cur; if(!s||!Rec.ready()||!Array.isArray(s.marks)) return null;
+  const start=s.marks[ci]; if(start==null) return null;
+  let end=null;
+  for(let j=ci+1;j<s.marks.length;j++){ if(s.marks[j]!=null){ end=s.marks[j]; break; } }
+  if(end==null){ const d=s.audioDur||Rec.duration(); end=d>start?d:start+3; }
+  return end>start ? {start,end} : null;
+}
+function leadPortion(seg){ return Math.min(1.6, Math.max(0.6,(seg.end-seg.start)*0.45)); }
+function speakStep(st, done){                           // recording if the line is aligned, else robot voice
+  const seg=audioSeg(st.ci);
+  if(seg){
+    if(st.tag==="lead") Rec.playSegment(seg.start, seg.start+leadPortion(seg), {onend:done});
+    else Rec.playSegment(seg.start, seg.end, {onend:done});
+  }else{
+    TTS.speak(st.text,{voiceURI:st.voice,rate:1,onend:done});
+  }
+}
+async function loadAudioFor(s){
+  Rec.unload();
+  if(s && s.audioName && Blobs.ok()){
+    const b=await Blobs.get(s.id);
+    if(b){ try{ Rec.load(URL.createObjectURL(b)); return true; }catch(e){} }
+  }
+  return false;
+}
+function recSourceLabel(){
+  const s=S.cur; if(!s) return "";
+  if(!s.audioName) return "🔊 Robot voice";
+  const need=s.chunks.length, have=marksCount(s);
+  if(Rec.ready() && have>0) return have>=need ? "🎙 Your recording" : "🎙 Your recording · "+(need-have)+" line"+(need-have===1?"":"s")+" on robot voice";
+  return "🎙 Recording attached — align lines in Edit";
+}
 
 /* ---------- app state ---------- */
 const S={
@@ -235,7 +423,7 @@ const S={
   index:[],            // [{id,title,chunks,updated}]
   cur:null,            // active script object
   draft:"",            // raw text while editing
-  settings:{ level:2, pace:1, loop:true, youVoice:"", cueVoice:"", rangeStart:0, rangeEnd:-1 }
+  settings:{ level:2, pace:1, loop:true, youVoice:"", cueVoice:"", rangeStart:0, rangeEnd:-1, listen:true }
 };
 
 async function boot(){
@@ -259,7 +447,7 @@ async function saveSettings(){ await Store.set("lr:settings",S.settings); }
 async function saveScript(s){
   s.updated=Date.now();
   await Store.set("lr:script:"+s.id,s);
-  const row={id:s.id,title:s.title,updated:s.updated,count:s.chunks.length};
+  const row={id:s.id,title:s.title,updated:s.updated,count:s.chunks.length,audio:!!s.audioName};
   const i=S.index.findIndex(x=>x.id===s.id);
   if(i>=0)S.index[i]=row; else S.index.unshift(row);
   await saveIndex();
@@ -267,7 +455,52 @@ async function saveScript(s){
 async function loadScript(id){ return await Store.get("lr:script:"+id); }
 async function delScript(id){
   await Store.del("lr:script:"+id);
+  try{ if(Blobs.ok()) await Blobs.del(id); }catch(e){}
   S.index=S.index.filter(x=>x.id!==id); await saveIndex();
+}
+
+/* Read a saved recording's length without keeping the element around. */
+function probeDuration(blob){
+  return new Promise(res=>{
+    try{
+      const u=URL.createObjectURL(blob), a=new Audio();
+      a.preload="metadata";
+      a.onloadedmetadata=()=>{ const d=isFinite(a.duration)?a.duration:0; try{URL.revokeObjectURL(u);}catch(e){} res(d); };
+      a.onerror=()=>{ try{URL.revokeObjectURL(u);}catch(e){} res(0); };
+      a.src=u;
+    }catch(e){ res(0); }
+  });
+}
+/* Persist the current editor contents (title + text), keeping any audio, and
+   return the saved script. Used by Save and by the audio actions, which need a
+   stored id before a recording can be attached. */
+async function persistEditor(){
+  const title=($("title").value||"Untitled monologue").trim();
+  const chunks=parseChunks($("raw").value);
+  if(!chunks.length) return null;
+  if(!S.settings.youVoice){const v=TTS.listVoices();if(v[0])S.settings.youVoice=v[0].voiceURI;if(v[1])S.settings.cueVoice=v[1].voiceURI;else if(v[0])S.settings.cueVoice=v[0].voiceURI;}
+  await saveSettings();
+  const s=S.cur||{id:uid()};
+  s.title=title; s.chunks=chunks; s.rawText=$("raw").value;
+  if(s.audioName) fitMarks(s);
+  await saveScript(s);
+  S.cur=s; return s;
+}
+/* Store a picked/recorded audio blob against the current piece. */
+async function attachAudio(blob,name){
+  if(!Blobs.ok()){ alert("This browser can’t store audio."); return; }
+  if(!blob||!blob.size){ alert("That recording was empty."); return; }
+  const mb=blob.size/1048576;
+  if(mb>40 && !confirm("That file is "+mb.toFixed(0)+" MB and may be too large to save. Continue?")) return;
+  const s=await persistEditor();
+  if(!s){ alert("Add the script text first, then attach a recording."); return; }
+  try{ await Blobs.put(s.id,blob); }
+  catch(e){ alert("Couldn’t save the recording — it may be too large for this browser’s storage."); return; }
+  s.audioName=name||"recording";
+  s.audioDur=await probeDuration(blob);
+  s.marks=new Array(s.chunks.length).fill(null);
+  await saveScript(s);
+  render();
 }
 
 /* =========================================================
@@ -277,17 +510,18 @@ function render(){
   const el=document.getElementById("app");
   el.innerHTML = S.view==="library" ? viewLibrary()
               : S.view==="edit"    ? viewEdit()
+              : S.view==="align"   ? viewAlign()
               : viewRehearse();
   wire();
   document.getElementById("subline").textContent =
-    S.view==="rehearse" && S.cur ? S.cur.title : "monologue trainer";
+    (S.view==="rehearse"||S.view==="align") && S.cur ? S.cur.title : "monologue trainer";
 }
 
 function viewLibrary(){
   const items = S.index.length ? S.index.map(x=>`
     <div class="scriptItem" data-open="${x.id}">
       <div>
-        <div class="t">${esc(x.title)}</div>
+        <div class="t">${esc(x.title)}${x.audio?` <span class="pill">🎙</span>`:""}</div>
         <div class="m">${x.count} chunk${x.count===1?"":"s"} · ${new Date(x.updated).toLocaleDateString()}</div>
       </div>
       <button class="btn small ghost go" data-open="${x.id}">Open ▸</button>
@@ -300,16 +534,84 @@ function viewLibrary(){
       ${items}
     </div>
     <div class="card">
-      <h2>How the ladder works</h2>
+      <h2>How it works</h2>
       <div class="rules">
-        <b style="color:var(--ink)">1 · Listen</b> — the whole piece read to you.<br>
-        <b style="color:var(--ink)">2 · Echo</b> — a chunk, then a gap to say it back.<br>
-        <b style="color:var(--ink)">3 · Lead-in</b> — first few words, gap, then the full chunk.<br>
-        <b style="color:var(--ink)">4 · Recall</b> — silence first, you say it, then it confirms.<br>
-        <b style="color:var(--ink)">5 · Off book</b> — silence only. Tap <span class="pill">Hint</span> when stuck.
-        <br><br>Built for driving: press play once and it runs hands-free. The big Hint button gives the lead-in without you having to look.
+        <b style="color:var(--ink)">🎧 Coach mode (default)</b> — it gives you each line, then listens and waits until you actually say it back before moving on. Take as long as you need; it won’t cut you off mid-line, and if you go blank it hands the line back.<br><br>
+        <b style="color:var(--ink)">🎙 Your own voice</b> — in <span class="pill">Edit</span> you can upload or record the piece and tap through it once to line it up, so it prompts you in your voice instead of the robot.<br><br>
+        <b style="color:var(--ink)">Hands-free ladder</b> — turn Coach off for the timed levels (Listen · Echo · Lead-in · Recall · Off book) that run without the mic — handy for driving.
       </div>
     </div>`;
+}
+
+function audioCardHTML(chunkCount){
+  const head=`<h2>Recording <span class="faint" style="text-transform:none;letter-spacing:0;font-weight:400">optional — your voice instead of the robot</span></h2>`;
+  if(!Blobs.ok()){
+    return `<div class="card">${head}<div class="faint">This browser can’t store audio recordings. Try a recent Safari or Chrome.</div></div>`;
+  }
+  const s=S.cur, has=!!(s&&s.audioName);
+  let body;
+  if(has){
+    const need=s.chunks.length, have=marksCount(s), done=have>=need&&need>0;
+    body=`
+      <div class="scriptItem" style="border:none;padding:2px 0">
+        <div>
+          <div class="t">🎙 ${esc(s.audioName)}</div>
+          <div class="m">${fmt(s.audioDur)} · ${done?"all lines aligned ✓":("aligned "+have+" / "+need)}</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary small" id="btnAlign">🎯 Align lines</button>
+        <button class="btn small ghost" id="btnReplace">Replace</button>
+        <button class="btn small danger" id="btnRemoveAudio" style="flex:0 0 auto">Remove</button>
+      </div>
+      <div class="faint" style="margin-top:8px">${done
+        ? "Rehearsal will play your recording for every line."
+        : "Tap <b style=\"color:var(--ink)\">Align lines</b> and play through once to map each line to the audio. Lines you don’t align use the robot voice."}</div>`;
+  }else{
+    body=`
+      <div class="row">
+        <button class="btn small" id="btnUpload">⬆ Upload audio</button>
+        ${Recorder.supported()?`<button class="btn small" id="btnRecord">● Record</button>`:""}
+      </div>
+      <div class="faint" style="margin-top:8px">${chunkCount?"Attach one recording of the whole piece (mp3, m4a, wav…). Then you’ll tap through it once to line it up with your text.":"Add your script text above first, then attach a recording."}</div>`;
+  }
+  return `<div class="card">${head}${body}<input type="file" id="audioFile" accept="audio/*" style="display:none"></div>`;
+}
+
+function viewAlign(){
+  const s=S.cur, total=s.chunks.length, idx=Align.idx;
+  const cur = idx-1>=0 ? s.chunks[idx-1] : null;   // line currently sounding
+  const up  = idx<total ? s.chunks[idx] : null;    // line to mark next
+  const have = Align.marks.filter(x=>x!=null).length;
+  const upTxt = up ? (up.cue?`<span class="whoTag">${esc(up.speaker||"cue")}</span>`:"")+esc(up.text) : "✓ Every line aligned";
+  return `
+    <div class="backbar">
+      <button class="btn ghost small" id="aback">◂ Back</button>
+      <div class="muted" style="margin-left:auto">${have} / ${total} aligned</div>
+    </div>
+    <div class="card">
+      <div class="rules">Play the recording and tap <b style="color:var(--ink)">“Next line starts now”</b> the instant each new line begins. Line 1 is pinned to the start for you.</div>
+    </div>
+    <div class="stage">
+      <div class="phase">${idx>=total?"All lines aligned":"Listen for line "+(idx+1)+" of "+total}</div>
+      <div class="cur ${up&&up.cue?"cue":""}">${upTxt}</div>
+      <div class="nxt">${cur?"now sounding: "+esc(cur.text.length>70?cur.text.slice(0,70)+"…":cur.text):""}</div>
+    </div>
+    <div class="set-row" style="margin-bottom:8px">
+      <input type="range" id="aseek" min="0" max="1000" step="1" value="0" style="flex:1;accent-color:var(--accent)">
+    </div>
+    <div class="muted" id="atime" style="text-align:center;margin-bottom:12px">0:00 / ${fmt(s.audioDur)}</div>
+    <div class="transport">
+      <button class="round" id="arestart" title="Back to start">⏮</button>
+      <button class="bigplay" id="aplay">▶ Play</button>
+      <button class="round" id="aundo" title="Undo last mark">↩</button>
+    </div>
+    <button class="hint" id="amark" ${idx>=total?"disabled":""} style="${idx>=total?"opacity:.5":""}">⏱ Next line starts now</button>
+    <div class="ctlrow">
+      <button class="btn" id="aclear">Clear marks</button>
+      <button class="btn primary" id="adone">Done</button>
+    </div>
+    <div style="height:24px"></div>`;
 }
 
 function viewEdit(){
@@ -322,6 +624,7 @@ function viewEdit(){
         <span class="n">${i+1}</span>${c.cue?`<span class="who">${esc(c.speaker)}</span>`:""}${esc(c.text)}
       </div>`).join("")
     : `<div class="faint">Paste text above to see the chunks.</div>`;
+  const audioCard = audioCardHTML(chunks.length);
   return `
     <div class="backbar">
       <button class="btn ghost small" id="back">◂ Back</button>
@@ -356,6 +659,7 @@ function viewEdit(){
         <button class="btn small ghost" id="testCue">▶ Test cue voice</button>
       </div>
     </div>
+    ${audioCard}
     <div class="card">
       <h2>Chunks <span class="pill">${chunks.length}</span></h2>
       <div id="preview">${preview}</div>
@@ -370,18 +674,24 @@ function viewEdit(){
 function viewRehearse(){
   const s=S.cur, set=S.settings;
   const total=s.chunks.length;
+  const coach=coachOn();
   const names=["Listen","Echo","Lead-in","Recall","Off book"];
   const lv=names.map((n,i)=>`<button class="lv ${set.level===i+1?"on":""}" data-lv="${i+1}">${i+1} · ${n}</button>`).join("");
+  const ladder = coach
+    ? `<div class="lv on" style="width:100%;text-align:center">🎧 Coach — I give you each line, you say it back to move on</div>`
+    : `<div class="levels">${lv}</div>`;
   return `
     <div class="backbar">
       <button class="btn ghost small" id="back">◂ Library</button>
       <button class="btn ghost small" id="edit" style="margin-left:auto">Edit</button>
     </div>
-    <div class="levels">${lv}</div>
+    ${ladder}
+    <div class="muted" id="srcline" style="text-align:center;margin:-8px 0 12px;font-size:12px">${recSourceLabel()}</div>
 
     <div class="stage" id="stage">
       <div class="phase" id="phase">Ready</div>
       <div class="cur" id="cur">Press play to begin.</div>
+      <div class="heard" id="heard"></div>
       <div class="nxt" id="nxt"></div>
     </div>
 
@@ -393,13 +703,18 @@ function viewRehearse(){
       <button class="bigplay" id="play">▶ Play</button>
       <button class="round" id="fwd1" title="Next">⏭</button>
     </div>
-    <button class="hint" id="hintBtn">💡 Hint — say the lead-in</button>
+    <button class="hint" id="hintBtn">💡 Hint — ${coach?"give me the line again":"say the lead-in"}</button>
     <div class="ctlrow">
       <button class="btn" id="repeat">↻ Repeat chunk</button>
       <button class="btn" id="restart">⟲ Restart</button>
     </div>
 
     <div class="card settings">
+      <label class="toggle" style="margin-bottom:14px${Ear.supported()?"":";opacity:.5"}">
+        <input type="checkbox" id="coach" ${set.listen?"checked":""} ${Ear.supported()?"":"disabled"}>
+        🎧 Coach me — listen and wait until I say each line
+        ${Ear.supported()?"":`<span class="faint">(this browser can’t listen — use Chrome)</span>`}
+      </label>
       <div class="set-row">
         <label>Pace</label>
         <input type="range" id="pace" min="0.6" max="1.8" step="0.1" value="${set.pace}">
@@ -426,17 +741,19 @@ function viewRehearse(){
 function wire(){
   if(S.view==="library") wireLibrary();
   else if(S.view==="edit") wireEdit();
+  else if(S.view==="align") wireAlign();
   else wireRehearse();
 }
 function $(id){return document.getElementById(id);}
 function on(id,ev,fn){const e=$(id);if(e)e.addEventListener(ev,fn);}
 
 function wireLibrary(){
+  Rec.unload();
   on("new","click",()=>{ S.cur=null; S.draft=""; S.view="edit"; render(); });
   document.querySelectorAll("[data-open]").forEach(b=>b.addEventListener("click",async e=>{
     const id=e.currentTarget.getAttribute("data-open");
     const s=await loadScript(id);
-    if(s){ S.cur=s; S.settings.rangeStart=0; S.settings.rangeEnd=-1; S.view="rehearse"; render(); }
+    if(s){ S.cur=s; if(!Array.isArray(s.marks))s.marks=[]; S.settings.rangeStart=0; S.settings.rangeEnd=-1; await loadAudioFor(s); S.view="rehearse"; render(); }
   }));
 }
 
@@ -457,40 +774,91 @@ function wireEdit(){
   on("cueVoice","change",e=>{S.settings.cueVoice=e.target.value;saveSettings();});
   on("testYou","click",()=>{TTS.cancel();TTS.speak("This is how your lines will sound when the app reads them back.",{voiceURI:$("youVoice").value,rate:1});});
   on("testCue","click",()=>{TTS.cancel();TTS.speak("And this voice reads the other characters.",{voiceURI:$("cueVoice").value,rate:1});});
+
+  /* ---- recording controls ---- */
+  let recActive=false;
+  on("btnUpload","click",()=>{ const f=$("audioFile"); if(f)f.click(); });
+  on("btnReplace","click",()=>{ const f=$("audioFile"); if(f)f.click(); });
+  on("audioFile","change",async e=>{
+    const f=e.target.files&&e.target.files[0]; e.target.value="";
+    if(f) await attachAudio(f, f.name);
+  });
+  const recBtn=$("btnRecord");
+  if(recBtn){
+    recBtn.addEventListener("click",async()=>{
+      if(!recActive){
+        try{ await Recorder.start(); recActive=true; recBtn.textContent="⏹ Stop recording"; recBtn.classList.add("primary"); }
+        catch(err){ alert("Couldn’t access the microphone."); }
+      }else{
+        recActive=false; recBtn.textContent="● Record"; recBtn.classList.remove("primary");
+        const blob=await Recorder.stop();
+        if(blob) await attachAudio(blob,"My recording");
+      }
+    });
+  }
+  on("btnRemoveAudio","click",async()=>{
+    if(!S.cur)return;
+    if(!confirm("Remove the recording? Your text stays."))return;
+    await Blobs.del(S.cur.id);
+    delete S.cur.audioName; delete S.cur.audioDur; S.cur.marks=new Array(S.cur.chunks.length).fill(null);
+    Rec.unload();
+    await saveScript(S.cur); render();
+  });
+  on("btnAlign","click",async()=>{
+    const s=await persistEditor(); if(!s)return;
+    await loadAudioFor(s);
+    if(!Rec.ready()){ alert("Couldn’t load the recording to align it."); return; }
+    const total=s.chunks.length;
+    Align.marks=(Array.isArray(s.marks)&&s.marks.length===total)?s.marks.slice():new Array(total).fill(null);
+    Align.marks[0]=0;
+    Align.idx=1; while(Align.idx<total && Align.marks[Align.idx]!=null) Align.idx++;
+    Rec.cancel(); Rec.seek(0);
+    S.view="align"; render();
+  });
+
   on("save","click",async()=>{
-    const title=($("title").value||"Untitled monologue").trim();
-    const chunks=parseChunks($("raw").value);
-    if(!chunks.length){ alert("Nothing to save yet. Paste your monologue first."); return; }
-    if(!S.settings.youVoice){const v=TTS.listVoices();if(v[0])S.settings.youVoice=v[0].voiceURI;if(v[1])S.settings.cueVoice=v[1].voiceURI;else if(v[0])S.settings.cueVoice=v[0].voiceURI;}
-    await saveSettings();
-    const s=S.cur||{id:uid()};
-    s.title=title; s.chunks=chunks; s.rawText=$("raw").value;
-    await saveScript(s);
-    S.cur=s; S.settings.rangeStart=0; S.settings.rangeEnd=-1;
+    const s=await persistEditor();
+    if(!s){ alert("Nothing to save yet. Paste your monologue first."); return; }
+    await loadAudioFor(s);
+    S.settings.rangeStart=0; S.settings.rangeEnd=-1;
     S.view="rehearse"; render();
   });
   on("delete","click",async()=>{
-    if(S.cur && confirm("Delete this piece?")){ await delScript(S.cur.id); S.cur=null; S.view="library"; render(); }
+    if(S.cur && confirm("Delete this piece?")){ await delScript(S.cur.id); S.cur=null; Rec.unload(); S.view="library"; render(); }
   });
 }
 
 /* ---------- rehearsal engine ---------- */
+function coachOn(){ return !!(S.settings.listen && Ear.supported()); }
+/* Speak one chunk's line — the recording if it's aligned, else the robot voice. */
+function speakLine(ci,done){
+  const seg=audioSeg(ci);
+  if(seg){ Rec.playSegment(seg.start,seg.end,{onend:done}); return; }
+  const c=S.cur.chunks[ci];
+  TTS.speak(c.text,{voiceURI:c.cue?(S.settings.cueVoice||S.settings.youVoice):S.settings.youVoice,rate:1,onend:done});
+}
 const Engine={
-  steps:[], chunkStart:[], pos:0, running:false, timer:null, wake:null,
-  curChunk:0,
+  steps:[], chunkStart:[], pos:0, running:false, timer:null, poll:null, wake:null,
+  curChunk:0, got:{},
 
   build(){
     const s=S.cur, set=S.settings, pace=set.pace;
     const a=set.rangeStart||0, b=(set.rangeEnd<0?s.chunks.length-1:set.rangeEnd);
     const you=set.youVoice, cue=set.cueVoice||set.youVoice;
     const gap=Math.round(320*pace);
-    this.steps=[]; this.chunkStart=[];
+    const coach=coachOn();
+    this.steps=[]; this.chunkStart=[]; this.got={};
     for(let ci=a; ci<=b && ci<s.chunks.length; ci++){
       const c=s.chunks[ci];
       this.chunkStart[ci]=this.steps.length;
       const push=(o)=>this.steps.push(Object.assign({ci},o));
       if(c.cue){
         push({type:"speak",text:c.text,voice:cue,tag:"cue",who:c.speaker});
+      }else if(coach){
+        /* Duolingo-style: give the line first (assume it isn't known), then
+           wait — mic open — until it's actually said back. */
+        push({type:"speak",text:c.text,voice:you,tag:"read"});
+        push({type:"listen",tag:"you"});
       }else{
         switch(set.level){
           case 1: push({type:"speak",text:c.text,voice:you,tag:"read"}); break;
@@ -520,18 +888,68 @@ const Engine={
     const st=this.steps[this.pos];
     this.curChunk=st.ci;
     paint(st);
-    if(st.type==="speak"){
-      TTS.speak(st.text,{voiceURI:st.voice,rate:1,onend:()=>{ if(!this.running)return; this.pos++; this.run(); }});
-    }else{
-      this.timer=setTimeout(()=>{ if(!this.running)return; this.pos++; this.run(); }, st.ms);
-    }
+    const self=this;
+    const done=()=>{ if(!self.running)return; self.pos++; self.run(); };
+    if(st.type==="speak"){ speakStep(st, done); }
+    else if(st.type==="listen"){ this.listenStep(st.ci, done); }
+    else{ this.timer=setTimeout(done, st.ms); }
   },
+
+  /* Interactive turn: mic open, aware of whether you're speaking, advancing
+     only once you've actually said the line. Never times out to the next line
+     on its own — if you go quiet without getting it, it hands the line back. */
+  listenStep(ci, done){
+    const self=this;
+    const c=S.cur.chunks[ci], expected=c.text, thr=matchThreshold(expected);
+    let committed="", curT="", heard="", started=false, lastGrow=Date.now(), finished=false, phase="listen";
+    const H=()=>$("heard");
+    const setHeard=()=>{ heard=(committed+" "+curT).trim(); const h=H(); if(h) h.textContent = heard ? "“"+heard.split(/\s+/).slice(-9).join(" ")+"”" : ""; };
+    const prompt=()=>{ const p=$("phase"),cu=$("cur"); if(p)p.textContent="🎧 Your turn — say it"; if(cu)cu.innerHTML=`<span class="silent">• say your line •</span>`; const h=H(); if(h)h.textContent=""; };
+    const succeed=()=>{
+      if(finished)return; finished=true; self.clearListen();
+      self.got[ci]=true;
+      const p=$("phase"),cu=$("cur"),h=H();
+      if(p)p.textContent="✓ Nice"; if(cu)cu.innerHTML=`<span class="silent" style="color:var(--good)">✓ got it</span>`; if(h)h.textContent="";
+      updateCounter();
+      self.timer=setTimeout(()=>{ if(self.running) done(); }, 600);
+    };
+    const arm=()=>{
+      Ear.start({
+        onresult:(t)=>{
+          if(finished)return;
+          curT=t||""; if(curT){ started=true; lastGrow=Date.now(); }
+          setHeard();
+          if(seqMatch(expected,heard)>=thr) succeed();
+        },
+        onend:()=>{ if(finished||!self.running)return; committed=(committed+" "+curT).trim(); curT=""; if(phase==="listen") arm(); }
+      });
+    };
+    const represent=()=>{                          // hand the line back, then listen fresh
+      if(finished||!self.running)return;
+      phase="give"; Ear.stop();
+      committed=""; curT=""; heard=""; started=false;
+      const p=$("phase"),cu=$("cur"); if(p)p.textContent="Here it is — say it after me";
+      if(cu){ if(c.cue) cu.innerHTML=`<span class="whoTag">${esc(c.speaker||"cue")}</span>${esc(c.text)}`; else cu.textContent=c.text; }
+      speakLine(ci, ()=>{ if(finished||!self.running)return; phase="listen"; lastGrow=Date.now(); prompt(); arm(); });
+    };
+    // begin: mic open, watch speech activity
+    phase="listen"; prompt(); arm();
+    this.poll=setInterval(()=>{
+      if(finished||!self.running){ self.clearListen(); return; }
+      if(phase!=="listen") return;                 // don't nudge while re-giving the line
+      const idle=Date.now()-lastGrow;
+      if(!started){ if(idle>9000) represent(); }    // stuck, never started → give it again
+      else if(idle>1900) represent();               // finished an attempt that wasn't right → give it again
+    }, 350);
+  },
+  clearListen(){ if(this.poll){ clearInterval(this.poll); this.poll=null; } try{ Ear.abort(); }catch(e){} },
+
   pause(){
     this.running=false; setPlayUI(false);
-    TTS.cancel(); clearTimeout(this.timer); this.releaseWake();
+    silence(); this.clearListen(); clearTimeout(this.timer); this.releaseWake();
   },
   toggle(){ this.running?this.pause():this.play(); },
-  stopHard(){ this.running=false; TTS.cancel(); clearTimeout(this.timer); this.releaseWake(); },
+  stopHard(){ this.running=false; silence(); this.clearListen(); clearTimeout(this.timer); this.releaseWake(); },
 
   gotoChunk(ci){
     ci=Math.max(this.rangeA??0, Math.min(ci, this.rangeB??(S.cur.chunks.length-1)));
@@ -552,16 +970,18 @@ const Engine={
   hint(){
     const c=S.cur.chunks[this.curChunk]; if(!c)return;
     const wasPlaying=this.running;
-    this.running=false; TTS.cancel(); clearTimeout(this.timer);
+    this.running=false; silence(); this.clearListen(); clearTimeout(this.timer);
     const phase=$("phase"); if(phase)phase.textContent="Hint";
-    TTS.speak(leadIn(c.text),{voiceURI:S.settings.youVoice,rate:1,onend:()=>{
-      if(wasPlaying){ this.running=true; this.run(); }
-    }});
+    const resume=()=>{ if(wasPlaying){ this.running=true; this.run(); } };
+    if(coachOn()){ speakLine(this.curChunk, resume); return; }   // coach: replay the whole line
+    const seg=audioSeg(this.curChunk);
+    if(seg) Rec.playSegment(seg.start, seg.start+leadPortion(seg), {onend:resume});
+    else TTS.speak(leadIn(c.text),{voiceURI:S.settings.youVoice,rate:1,onend:resume});
   },
 
   end(){
     if(S.settings.loop){ this.pos=this.chunkStart[this.rangeA??0]||0; this.run(); return; }
-    this.running=false; setPlayUI(false); this.releaseWake();
+    this.running=false; setPlayUI(false); this.clearListen(); this.releaseWake();
     const phase=$("phase"), cur=$("cur"), nxt=$("nxt");
     if(phase)phase.textContent="Done"; if(cur)cur.textContent="End of range."; if(nxt)nxt.textContent="";
   },
@@ -571,13 +991,21 @@ const Engine={
   releaseWake(){ try{ if(this.wake){ this.wake.release(); this.wake=null; } }catch(e){} }
 };
 
-const PHASE={read:"Reading",lead:"Lead-in",you:"Your turn",confirm:"Confirm",echo:"Say it back",silent:"Off book",cue:"Cue",gap:""};
+const PHASE={read:"Your line — listen",lead:"Lead-in",you:"Your turn",confirm:"Confirm",echo:"Say it back",silent:"Off book",cue:"Cue",gap:""};
+function updateCounter(){
+  const counter=$("counter"); if(!counter)return;
+  const s=S.cur; if(!s)return;
+  const ci=Engine.curChunk, total=s.chunks.length;
+  let got=0; for(const k in Engine.got){ if(Engine.got[k]) got++; }
+  counter.textContent = `Chunk ${ci+1} / ${total}` + (got?` · ✓ ${got}`:"");
+}
 function paint(st){
   if(!st)return;
-  const s=S.cur, total=s.chunks.length, ci=st.ci;
+  const s=S.cur, ci=st.ci;
   const c=s.chunks[ci], nc=s.chunks[ci+1];
-  const phase=$("phase"), cur=$("cur"), nxt=$("nxt"), bar=$("bar"), counter=$("counter");
+  const phase=$("phase"), cur=$("cur"), nxt=$("nxt"), bar=$("bar"), hd=$("heard");
   if(st.tag==="gap") return;
+  if(hd && st.tag!=="you") hd.textContent="";
   if(phase) phase.textContent=PHASE[st.tag]||"";
   if(cur){
     cur.classList.toggle("cue", !!c.cue);
@@ -593,7 +1021,7 @@ function paint(st){
   }
   if(nxt){ nxt.textContent = nc ? "next: "+ (nc.cue?("["+nc.speaker+"] "):"") + (nc.text.length>90?nc.text.slice(0,90)+"…":nc.text) : ""; }
   if(bar){ const span=(Engine.rangeB-Engine.rangeA)||1; bar.style.width=Math.round(((ci-Engine.rangeA)/span)*100)+"%"; }
-  if(counter){ counter.textContent=`Chunk ${ci+1} / ${total}`; }
+  updateCounter();
 }
 function setPlayUI(on){
   const p=$("play"); if(!p)return;
@@ -608,12 +1036,17 @@ function wireRehearse(){
   if(rsV)rsV.textContent=(set.rangeStart||0)+1;
   if(reV)reV.textContent=(set.rangeEnd<0?total:set.rangeEnd+1);
 
+  // load the recording (if any) so coaching/playback can use it
+  if(S.cur.audioName && Blobs.ok() && !Rec.ready()){
+    loadAudioFor(S.cur).then(()=>{ const sl=$("srcline"); if(sl) sl.textContent=recSourceLabel(); });
+  }
   document.querySelectorAll("[data-lv]").forEach(b=>b.addEventListener("click",e=>{
     set.level=+e.currentTarget.getAttribute("data-lv"); saveSettings();
     document.querySelectorAll("[data-lv]").forEach(x=>x.classList.remove("on"));
     e.currentTarget.classList.add("on");
     Engine.rebuild();
   }));
+  on("coach","change",e=>{ set.listen=e.target.checked; saveSettings(); render(); });
   on("play","click",()=>Engine.toggle());
   on("hintBtn","click",()=>Engine.hint());
   on("repeat","click",()=>Engine.repeat());
@@ -632,6 +1065,37 @@ function wireRehearse(){
   on("loop","change",e=>{ set.loop=e.target.checked; saveSettings(); });
 
   Engine.build(); paint(Engine.steps[0]);
+}
+
+/* ---------- alignment screen (tap the recording to the text) ---------- */
+const Align={ marks:[], idx:1, raf:null };
+function alignTick(){
+  const t=Rec.time(), d=(S.cur&&S.cur.audioDur)||Rec.duration()||0;
+  const at=$("atime"); if(at) at.textContent=fmt(t)+" / "+fmt(d);
+  const sk=$("aseek"); if(sk && !sk._drag) sk.value = d ? Math.round(t/d*1000) : 0;
+  Align.raf = Rec.playing() ? requestAnimationFrame(alignTick) : null;
+}
+function stopAlignTick(){ if(Align.raf){ cancelAnimationFrame(Align.raf); Align.raf=null; } }
+function wireAlign(){
+  const s=S.cur, total=s.chunks.length;
+  const setBtn=()=>{ const b=$("aplay"); if(b) b.innerHTML=Rec.playing()?"⏸ Pause":"▶ Play"; };
+  setBtn();
+  if(Rec.playing() && !Align.raf) Align.raf=requestAnimationFrame(alignTick);
+  on("aplay","click",()=>{
+    if(Rec.playing()){ Rec.pauseEl(); }
+    else{ Rec.play(); if(!Align.raf) Align.raf=requestAnimationFrame(alignTick); }
+    setBtn();
+  });
+  on("amark","click",()=>{
+    if(Align.idx<total){ Align.marks[Align.idx]=Rec.time(); Align.idx++; render(); }
+  });
+  on("aundo","click",()=>{ if(Align.idx>1){ Align.idx--; Align.marks[Align.idx]=null; render(); } });
+  on("arestart","click",()=>{ Rec.seek(0); });
+  on("aclear","click",()=>{ Align.marks=new Array(total).fill(null); Align.marks[0]=0; Align.idx=1; render(); });
+  on("aseek","input",e=>{ const d=(s.audioDur||Rec.duration()||0); e.target._drag=true; Rec.seek(d*(+e.target.value/1000)); const at=$("atime"); if(at)at.textContent=fmt(Rec.time())+" / "+fmt(d); });
+  on("aseek","change",e=>{ e.target._drag=false; });
+  on("adone","click",async()=>{ stopAlignTick(); Rec.pauseEl(); s.marks=Align.marks.slice(); await saveScript(s); S.view="edit"; render(); });
+  on("aback","click",()=>{ stopAlignTick(); Rec.pauseEl(); S.view="edit"; render(); });
 }
 
 document.addEventListener("visibilitychange",()=>{ if(document.hidden && Engine.running){ /* keep running; iOS may pause speech */ } });
